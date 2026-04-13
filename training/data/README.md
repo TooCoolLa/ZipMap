@@ -2,7 +2,7 @@
 
 | Dataset | Static / Dynamic | Comments |
 |---|---|---|
-| [Aria Synthetic Environments](https://www.projectaria.com/datasets/ase) | Static | Class C; only used first 5% of the data |
+| [Aria Synthetic Environments](https://www.projectaria.com/datasets/ase) | Static | Class C; only the first 5% of the data is used |
 | [ARKitScenes](https://github.com/apple/ARKitScenes) | Static | Class B |
 | [BlendedMVS](https://github.com/YoYo000/BlendedMVS) | Static | Class B |
 | [Co3Dv2](https://github.com/facebookresearch/co3d) | Static | Class A |
@@ -28,28 +28,22 @@
 | [BEDLAM](https://bedlam.is.tue.mpg.de/) | Dynamic | Class B |
 | [Dynamic Replica](https://github.com/facebookresearch/dynamic_stereo) | Dynamic | Class B |
 | [Kubric](https://github.com/google-research/kubric) | Dynamic | Class C |
-| [OmniWorld](https://yangzhou24.github.io/OmniWorld/) | Dynamic | Class C; only used the first released 5k video clips of the data |
+| [OmniWorld](https://yangzhou24.github.io/OmniWorld/) | Dynamic | Class C; only the first 5k released video clips are used |
 | [PointOdyssey](https://pointodyssey.com/) | Dynamic | Class B |
 | [Spring](https://spring-benchmark.org/) | Dynamic | Class B |
 
-Datasets are categorized into Class A, B, and C based on the preprocessing process of converting data format. 
+The dataloaders for all datasets are implemented in `training/data/datasets/`. Datasets are categorized into Class A, B, and C based on their preprocessing pipelines. Please first download and preprocess each dataset by following the instructions for its class:
 
-After this step, all datasets will use our scripts (starts with `merge_` or `save_`) in `training/data/datasets/preprocess/` to
- save the metadata (camera parameters image paths, etc) to a single file to improve IO efficiency during training.
+### Preprocessing by Class
+- **Class A**: preprocessed with the scripts provided by [VGGT](https://github.com/facebookresearch/vggt/tree/main/training).
+- **Class B**: preprocessed with the scripts provided by [CUT3R](https://github.com/CUT3R/CUT3R/blob/main/docs/preprocess.md).
+- **Class C**: preprocessed with our custom scripts in `training/data/datasets/preprocess/`, whose filenames start with `preprocess_`. We also provide auxiliary scripts prefixed with `download_`, `decompress_`, or `extract_` to assist with downloading, decompressing, and extracting the datasets. Please refer to the comments in each script for details.
 
-Some metadata saving scripts (such as the ones for hypersim, tartanair, tartanground) also include additional processing, such as filtering out the low quality data. 
+### Generating Metadata
+After the steps above, **all datasets** are further processed with our scripts in `training/data/datasets/preprocess/` (prefixed with `merge_` or `save_`) to consolidate metadata (camera parameters, image paths, etc.) into a single file, which improves I/O efficiency during training.
 
-### Class A
-`Class A` needs to be first preprocessed with scripts provided by [VGGT](https://github.com/facebookresearch/vggt/tree/main/training). 
-After that, you can run our scripts in `training/data/datasets/preprocess/` to save the metadata to improve IO efficiency.
-
-
-### Class B
-`Class B` needs to be preprocessed with scripts provided by [CUT3R](https://github.com/CUT3R/CUT3R/blob/main/docs/preprocess.md). After that, you can run our scripts in `training/data/datasets/preprocess/` to save the metadata to improve IO efficiency.
+### Others
+Some metadata-saving scripts (e.g., those for Hypersim, TartanAir, and TartanGround) also perform additional processing, such as filtering out low-quality data.
 
 
-### Class C
-`Class C` needs to be preprocessed with our custom scripts in `training/data/datasets/preprocess/`，starting with `preprocess_`. After that, you can run our scripts in `training/data/datasets/preprocess/` to save the metadata to improve IO efficiency.
-
-I have provided some auxiliary scripts, starting with `download_`, `decompress_`, or `extract_` to help with the downloading, decompressing, and extracting of the datasets. Please check the comments in the scripts for more details.
 
