@@ -41,8 +41,8 @@ pip install -e .
 
 | Model | Description |
 |-------|-------------|
-| [**ZipMap**](YOUR_LINK_HERE) | Main model; no reference view specification (stage 3 checkpoint) |
-| [ZipMap w/ reference view](YOUR_LINK_HERE) | With reference view specification (stage 2 checkpoint) |
+| [**ZipMap**](https://huggingface.co/coast01/ZipMap/blob/main/checkpoint_aff_inv.pt) | Main model; no reference view specification (stage 3 checkpoint) |
+| [ZipMap w/ reference view](https://huggingface.co/coast01/ZipMap/blob/main/checkpoint_with_ref_view.pt) | With reference view specification (stage 2 checkpoint) |
 <!-- | [ZipMap Streaming](YOUR_LINK_HERE) | Supports online/streaming inference (fine-tuned from ZipMap) |
 | [ZipMap w/ state query](YOUR_LINK_HERE) | Supports state query (fine-tuned from ZipMap w/ reference view) | -->
 
