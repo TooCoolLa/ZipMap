@@ -102,7 +102,7 @@ class MidAirDataset(BaseDataset):
         self,
         common_conf,
         split: str = 'train',
-        MidAir_DIR: str = "/home/haian/codebase/vggt_code/raw_data/mid_air/",
+        MidAir_DIR: str = "/home/haian/codebase/zipmap_code/raw_data/mid_air/",
         min_num_images: int = 24,
         len_train: int = 33600,
         len_test: int = 1000,
