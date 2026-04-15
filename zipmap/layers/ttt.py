@@ -82,45 +82,6 @@ def zeropower_via_newtonschulz5(G, steps):
     return X
 
 
-@torch.compile()
-def zeropower_via_newtonschulz5_new(G):
-    """
-    This is an updated version of the zeropower_via_newtonschulz5 function in here:
-    https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt_medium.py#L26
-    The code is modified from https://github.com/MoonshotAI/Moonlight/blob/master/examples/toy_train.py#L49, which contains the original muon implementation.
-    Major change: G is [b, d, d] rather than [d, d]
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G.
-    Args:
-        G: [b, d, d']
-    Returns:
-        X: [b, d, d']
-    FLOPS:  When d=d', Total FLOPS=30 * b * d^3
-    """
-    assert len(G.shape) == 3
-    X = G.bfloat16()
-    if G.size(1) > G.size(2):
-        X = X.transpose(1, 2)
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(1, 2), keepdim=True) + 1e-7)
-    # Perform the NS iterations
-    for a, b, c in [
-        (4.0848, -6.8946, 2.9270),
-        (3.9505, -6.3029, 2.6377),
-        (3.7418, -5.5913, 2.3037),
-        (2.8769, -3.1427, 1.2046),
-        (2.8366, -3.0525, 1.2012),
-    ]:
-        A = X @ X.transpose(1, 2)
-        B = (
-            b * A + c * A @ A
-        )  # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
-
-    if G.size(1) > G.size(2):
-        X = X.transpose(1, 2)
-    return X
-
-
 
 @torch.compile(dynamic=True)
 def fast_weight_swish_glu_weight_norm_mini_batch_apply(
@@ -186,13 +147,6 @@ def fast_weight_swish_glu_weight_norm_mini_batch_apply(
                 (ki * lr2i).transpose(-1, -2) @ dhidden_before_mul, muon_update_steps
             )
 
-            # # no muon update
-            # # [b, dh, l] @ [b, l, d] -> [b, dh, d]
-            # w1_grad = (hidden * lr1i).transpose(-1, -2) @ vi
-            
-            # w0_grad = (ki * lr0i).transpose(-1, -2) @ dgate_before_act
-            
-            # w2_grad = (ki * lr2i).transpose(-1, -2) @ dhidden_before_mul
 
             w1_now = w1_now + w1_grad
             w0_now = w0_now + w0_grad

@@ -4,7 +4,8 @@ model_config = {
     "img_size": 518,
     "patch_size": 14,
     "embed_dim": 1024,
-    "enable_camera": True,
+    "enable_camera": False,
+    "enable_camera_mlp": True,
     "enable_local_point": True,
     "enable_depth": True,
     "ttt_config": 
@@ -17,7 +18,8 @@ model_config = {
                 "base_lr": 0.01,
                 "muon_update_steps": 5,
                 "use_gate_fn": True
-            }
+            },
+            "window_size": 1
         },
     "other_config": {
         "use_gradient_checkpointing_local_point": False,
@@ -38,12 +40,11 @@ from datetime import datetime
 import glob
 import gc
 import time
-import argparse
-
+import argparse 
 sys.path.append("zipmap/")
 
 from visual_util import predictions_to_glb
-from zipmap.models.ZipMap import ZipMap
+from zipmap.models.ZipMap_AR import ZipMap
 from zipmap.utils.load_fn import load_and_preprocess_images
 from zipmap.utils.pose_enc import pose_encoding_to_extri_intri
 from zipmap.utils.geometry import unproject_depth_map_to_point_map, closed_form_inverse_se3, homogenize_points
@@ -53,16 +54,12 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Initializing and loading ZipMap model...")
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--ckpt_path', type=str, default="./checkpoints/checkpoint_aff_inv.pt", help='Path to the model checkpoint')
+parser.add_argument('--ckpt_path', type=str, default="./checkpoints/checkpoint_online.pt", help='Path to the model checkpoint')
 parser.add_argument('--ema', action='store_true', help='Use EMA weights if available')
 parser.add_argument('--align_first_view', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True, help='Align output point cloud to the first view coordinate system (default: True)')
-parser.add_argument('--affine_invariant', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True, help='Whether to use affine invariant mode (default: True)')
 args = parser.parse_args()
 
-model_config["other_config"]["affine_invariant"] = args.affine_invariant
-
 model = ZipMap(**model_config)
-
 ckpt_path = args.ckpt_path
 checkpoint = torch.load(ckpt_path, map_location="cpu",weights_only=True)
 if args.ema and "ema" in checkpoint:
@@ -82,14 +79,15 @@ model.eval()
 model = model.to(device)
 
 
-
-
 # -------------------------------------------------------------------------
 # 1) Core model inference
 # -------------------------------------------------------------------------
 def run_model(target_dir, model) -> dict:
     """
     Run the ZipMap model on images in the 'target_dir/images' folder and return predictions.
+    Args:
+        target_dir: Directory containing the images subfolder
+        model: The ZipMap model
     """
     print(f"Processing images from {target_dir}")
 
@@ -130,24 +128,23 @@ def run_model(target_dir, model) -> dict:
         if isinstance(predictions[key], torch.Tensor):
             predictions[key] = predictions[key].cpu().float().numpy().squeeze(0)  # remove batch dimension
     predictions['pose_enc_list'] = None # remove pose_enc_list
+    predictions['pose_enc_mlp_list'] = None
 
     # Align all cameras (and subsequent world points) to the first view's coordinate frame
     if args.align_first_view:
         print("Aligning to first view coordinate frame...")
-        # extrinsic is (S, 3, 4); build (S, 4, 4) homogeneous form
         S_frames = predictions["extrinsic"].shape[0]
         extrinsics_homog = np.concatenate(
             [predictions["extrinsic"], np.zeros((S_frames, 1, 4), dtype=predictions["extrinsic"].dtype)],
             axis=-2,
         )  # (S, 4, 4)
         extrinsics_homog[:, -1, -1] = 1.0
-        # closed_form_inverse_se3 expects (N, 4, 4); use [0:1] to keep batch dim
-        first_cam_inv = closed_form_inverse_se3(extrinsics_homog[0:1])[0]  # (4, 4)  cam-to-world of first cam
+        first_cam_inv = closed_form_inverse_se3(extrinsics_homog[0:1])[0]  # (4, 4)
         new_extrinsics_homog = extrinsics_homog @ first_cam_inv  # (S, 4, 4)
-
         predictions["extrinsic"] = new_extrinsics_homog[:, :3, :]  # (S, 3, 4)
     else:
         print("Not aligning to first view coordinate frame. Output will be in the original camera coordinate system predicted by the model.")
+
     # Generate world points from depth map
     print("Computing world points from depth map...")
     depth_map = predictions["depth"]  # (S, H, W, 1)
@@ -423,6 +420,8 @@ def update_visualization(
 # -------------------------------------------------------------------------
 # Example images
 # -------------------------------------------------------------------------
+
+
 dl3dv_video = "examples/videos/dl3dv.mp4"
 room_video = "examples/videos/room.mp4"
 kitchen_video = "examples/videos/kitchen.mp4"
@@ -433,6 +432,8 @@ sora_big_sur_video = "examples/videos/sora_big-sur.mp4"
 Istanbul_video = "examples/videos/Istanbul.mp4"
 figureskating_video = "examples/videos/figureskating.mp4"
 walkthrough_video = "examples/videos/walkthrough.mp4"
+
+
 # -------------------------------------------------------------------------
 # 6) Build Gradio UI
 # -------------------------------------------------------------------------
@@ -582,15 +583,13 @@ with gr.Blocks(
 
     # ---------------------- Examples section ----------------------
     examples = [
-        [figureskating_video, "28", None, 6.0, 10.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
         [Istanbul_video, "44", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
         # [sora_big_sur_video, "19", None, 3.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
         [pyramid_video, "30", None, 1.0, 35.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [drift_straight_video, "25", None, 12.0, 25.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
         [room_video, "8", None, 1.0, 5.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [dl3dv_video, "111", None, 8.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
-        [kitchen_video, "25", None, 1.0, 40.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [walkthrough_video, "90", None, 3.0, 30.0, False, False, True, True, "Depthmap and Camera Branch", "True", 0.6],
+        [dl3dv_video, "29", None, 2.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
+        [kitchen_video, "29", None, 2.0, 40.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
+        [figureskating_video, "14", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
         [single_cartoon_video, "1", None, 1.0, 15.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
 
     ]
@@ -608,6 +607,7 @@ with gr.Blocks(
         prediction_mode,
         is_example_str,
         cam_size_factor=1.0,
+
     ):
         """
         1) Copy example images to new target_dir
@@ -640,6 +640,7 @@ with gr.Blocks(
             prediction_mode,
             is_example,
             cam_size_factor,
+
         ],
         outputs=[reconstruction_output, log_output, target_dir_output, frame_filter, image_gallery],
         fn=example_pipeline,
@@ -720,6 +721,3 @@ with gr.Blocks(
     )
 
     demo.queue(max_size=20).launch(show_error=True, share=True)
-
-
-

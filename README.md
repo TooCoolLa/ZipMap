@@ -38,13 +38,13 @@ pip install -e .
 
 ## 2. Inference
 ### 2.1 ZipMap Checkpoints
-
 | Model | Description |
 |-------|-------------|
-| [**ZipMap**](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_aff_inv.pt) | Main model; no reference view specification (stage 3 checkpoint) |
+| [**ZipMap**](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_aff_inv.pt) | Main model; no reference view specification (stage 3 checkpoint)|
+| ***ZipMap Variants*** | |
 | [ZipMap w/ reference view](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_with_ref_view.pt) | With reference view specification (stage 2 checkpoint) |
-<!-- | [ZipMap Streaming](YOUR_LINK_HERE) | Supports online/streaming inference (fine-tuned from ZipMap) |
-| [ZipMap w/ state query](YOUR_LINK_HERE) | Supports state query (fine-tuned from ZipMap w/ reference view) | -->
+| [ZipMap Streaming](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_online.pt) | Supports online/streaming inference (fine-tuned from ZipMap) |
+<!-- | [ZipMap w/ state query](TBD) | Supports state query (fine-tuned from ZipMap w/ reference view) | -->
 
 ### 2.2 Interactive Gradio Demo
 Launch the demo locally:
@@ -54,7 +54,17 @@ python demo_gradio_zipmap.py --ckpt_path /path/to/your/checkpoint.pt
 ```
 If using the checkpoint with reference view specification, you disable the affine invariant by setting `--affine_invariant false` when launching the demo.
 
-### 2.2 Quantitative Evaluation
+We also provide scripts to run the demo for the streaming version of ZipMap. 
+<details>
+<summary>Expand to see:</summary>
+The torch.compile for streaming version of ZipMap takes significant time, please disable torch.compile by setting the environment variable `TORCH_COMPILE_DISABLE=1` before launching the demo:
+
+```bash
+TORCH_COMPILE_DISABLE=1 python demo_gradio_zipmap_streaming.py --ckpt_path /path/to/your/online_checkpoint.pt
+```
+</details>
+
+### 2.3 Quantitative Evaluation
 [**TODO**] See branch `evaluation` for code and instructions on how to run the quantitative evaluation.
 
 ## 3. Training
@@ -121,6 +131,40 @@ torchrun --nproc_per_node=8 training/launch.py --config default_stage2_hi_res_dy
 # Stage 3: Remove the reference view specification and keep tuning on all 29 datasets.
 torchrun --nproc_per_node=8 training/launch.py --config default_stage3_hi_res_dynamic_aff_inv base_data_dir=/path/to/your/data checkpoint.resume_checkpoint_path=/path/to/your/stage2_checkpoint.ckpt
 ```
+
+### 3.4 Fine-tuning
+
+#### 3.4.1 ZipMap Streaming
+
+We train a ZipMap-Streaming model by finetuning the offline ZipMap checkpoint (stage 3). We replace the transformer-based camera head with a lightweight MLP-based camera head, keep the rest of the model unchanged, and fine-tune on all 29 datasets.
+<details>
+<summary><strong>Expand to see run commands:</strong></summary>
+
+```bash
+# Stage 1: Train on 12-view context length for 60k iterations.
+torchrun --nproc_per_node=8 training/launch.py --config default_finetune_online_run1 base_data_dir=/path/to/your/data checkpoint.resume_checkpoint_path=/path/to/your/offline_stage3_checkpoint.ckpt
+
+# Stage 2: Continue training on 24-view context length for 30k iterations.
+torchrun --nproc_per_node=8 training/launch.py --config default_finetune_online_run2 base_data_dir=/path/to/your/data checkpoint.resume_checkpoint_path=/path/to/your/previous_online_run_checkpoint.ckpt
+
+# We have seen obvious improvements after extending the training context length from 12 to 24. Due to time constraints, we only train the model on 24-view context length. If you have more time and resources, I recommend continuing to train the model on a longer context length (e.g., 48 or 64 views) for further performance improvement.
+
+```
+</details>
+
+
+> **Note:** Due to time constraints, we did not fully explore the streaming setting and only ran a last-shot experiment. With more careful tuning and longer training, the streaming model's performance can likely be further improved.
+
+<details>
+<summary><strong>Potential directions to explore:</strong></summary>
+
+- Replace the current `TTT with Muon` with `TTT with momentum`, which is much more efficient for streaming-version training.
+- Fine-tune from the stage 2 checkpoint (with reference view specification) instead of the stage 3 checkpoint, which may improve training stability and potentially improve final performance.
+- Instead of directly replacing the camera head with a lightweight MLP-based head, re-use the transformer-based camera head and only replace its bidirectional self-attention with causal attention.
+- Train on a longer context length (e.g., 48 or 64 views).
+
+</details>
+
 
 ## Acknowledgements
 

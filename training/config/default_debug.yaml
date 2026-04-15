@@ -110,7 +110,7 @@ loss:
   _target_: full_loss.Full_MultitaskLoss
   camera:
     weight: 5.0
-    loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.
+    loss_type: "l1" 
   depth:
     weight: 1.0
     gradient_loss_fn: "grad"
