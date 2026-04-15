@@ -23,6 +23,12 @@
 }
 ```
 
+## Updates
+- **2026-04-15**: Released ZipMap with state query support.
+- **2026-04-14**: Released the streaming version of ZipMap along with its training and demo scripts.
+- **2026-04-12**: Released code, checkpoints, and the interactive Gradio demo for ZipMap main model.
+- **2026-02**: ZipMap accepted to CVPR 2026.
+
 ## 0. Clarification
 This is a **reimplementation** of the code for the paper "ZipMap: Linear-Time Stateful 3D Reconstruction via Test-Time Training".
 
@@ -38,19 +44,20 @@ pip install -e .
 
 ## 2. Inference
 ### 2.1 ZipMap Checkpoints
+Download the ZipMap checkpoints hosted on Hugging Face:
 | Model | Description |
 |-------|-------------|
 | [**ZipMap**](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_aff_inv.pt) | Main model; no reference view specification (stage 3 checkpoint)|
 | ***ZipMap Variants*** | |
 | [ZipMap w/ reference view](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_with_ref_view.pt) | With reference view specification (stage 2 checkpoint) |
 | [ZipMap Streaming](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_online.pt) | Supports online/streaming inference (fine-tuned from ZipMap) |
-<!-- | [ZipMap w/ state query](TBD) | Supports state query (fine-tuned from ZipMap w/ reference view) | -->
+| [ZipMap w/ state query](https://huggingface.co/coast01/ZipMap/resolve/main/checkpoint_state_query.pt) | Supports state query (fine-tuned from ZipMap w/ reference view) |
 
 ### 2.2 Interactive Gradio Demo
-Launch the demo locally:
+Launch the demo locally for the main ZipMap model:
 
 ```bash
-python demo_gradio_zipmap.py --ckpt_path /path/to/your/checkpoint.pt
+python demo_gradio_zipmap.py --ckpt_path /path/to/zipmap_main_checkpoint.pt
 ```
 If using the checkpoint with reference view specification, you disable the affine invariant by setting `--affine_invariant false` when launching the demo.
 
@@ -135,7 +142,17 @@ torchrun --nproc_per_node=8 training/launch.py --config default_stage3_hi_res_dy
 
 ### 3.4 Fine-tuning
 
-#### 3.4.1 ZipMap Streaming
+#### 3.4.1 ZipMap State Query
+We train a ZipMap-State-Query model by finetuning the ZipMap checkpoint with reference view specification (stage 2 checkpoint)
+<details>
+<summary><strong>Expand to see run commands:</strong></summary>
+
+```bash
+torchrun --nproc_per_node=8 training/launch.py --config default_finetune_state_query base_data_dir=/path/to/your/data checkpoint.resume_checkpoint_path=/path/to/your/stage2_checkpoint.ckpt
+```
+</details>
+
+#### 3.4.2 ZipMap Streaming
 
 We train a ZipMap-Streaming model by finetuning the offline ZipMap checkpoint (stage 3). We replace the transformer-based camera head with a lightweight MLP-based camera head, keep the rest of the model unchanged, and fine-tune on all 29 datasets.
 <details>
@@ -165,6 +182,8 @@ torchrun --nproc_per_node=8 training/launch.py --config default_finetune_online_
 - Train on a longer context length (e.g., 48 or 64 views).
 
 </details>
+
+
 
 
 ## Acknowledgements

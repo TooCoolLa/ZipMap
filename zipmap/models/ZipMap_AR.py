@@ -7,7 +7,6 @@ from huggingface_hub import PyTorchModelHubMixin
 from zipmap.models.aggregator_ttt import Aggregator
 from zipmap.heads.camera_head import CameraHead, CameraHead_MLP
 from zipmap.heads.dpt_head_vggt_legacy import DPTHead
-from zipmap.utils.geometry import closed_form_inverse_se3
 import random
 
 TTTOperator = collections.namedtuple("TTTOperator", ["start", "end", "update", "apply"])
@@ -114,12 +113,11 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
         
-
-
         info = {
             # "ttt_op_order": ttt_op_order, # define later in forward
             "store_state": store_state, # if to store the state_list for future queries
         }
+
         if window_size is not None:
             info["window_size"] = window_size
         elif "window_size" in self.ttt_config:
@@ -176,81 +174,5 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
 
         return predictions
 
-    def get_aggregator_query_conditions(self, query_info):
-        input_view_conditions = None
-        query_conditions = None
-        if self.nvs_input_type == "unposed_ray":
-            query_conditions = query_info["target_ray_cond"]
-        elif self.nvs_input_type == "posed_ray":
-            input_view_conditions = query_info.get("input_ray_cond", None)
-            query_conditions = query_info["target_ray_cond"]
-        aggregator_query_conditions = {
-            "cond_type": self.nvs_input_type,
-            "query_conditions": query_conditions,
-            "input_view_conditions": input_view_conditions,
-        }
-        return aggregator_query_conditions
-    
 
     
-
-    def _normalize_to_first_view(self, extrinsics_c2w):
-        """
-        Transform camera extrinsics to the first camera's coordinate system.
-        After transformation, the first camera will have identity rotation and zero translation.
-
-        Args:
-            extrinsics_c2w: [B, S, 3, 4] or [B, S, 4, 4] camera-to-world matrices
-
-        Returns:
-            normalized_extrinsics: [B, S, 4, 4] normalized camera-to-world matrices
-        """
-        B, S = extrinsics_c2w.shape[:2]
-        device = extrinsics_c2w.device
-
-        # Convert to homogeneous form (4x4)
-        if extrinsics_c2w.shape[-2:] == (3, 4):
-            bottom_row = torch.zeros((B, S, 1, 4), device=device)
-            bottom_row[:, :, 0, 3] = 1.0
-            extrinsics_c2w = torch.cat([extrinsics_c2w, bottom_row], dim=-2)
-
-        # Get the first camera's c2w matrix
-        first_cam_c2w = extrinsics_c2w[:, 0]  # [B, 4, 4]
-
-        # Compute the inverse to get w2c of first camera
-        first_cam_w2c = closed_form_inverse_se3(first_cam_c2w[:, :3, :4])  # [B, 4, 4]
-
-        # Transform all cameras: new_c2w = first_cam_w2c @ old_c2w
-        # This makes the first camera become identity
-        normalized_extrinsics = torch.matmul(
-            first_cam_w2c.unsqueeze(1),  # [B, 1, 4, 4]
-            extrinsics_c2w  # [B, S, 4, 4]
-        )  # [B, S, 4, 4]
-
-        return normalized_extrinsics
-
-    def render(self, info={}, ray_conditions: torch.Tensor = None, chunksize: int = 50):
-        """
-        render nvs rgb and depth given ray conditions only
-        """
-        B, S_target, C, H, W = ray_conditions.shape
-        NVS_prediction_list = []
-        NVS_prediction_conf_list = []
-        for cur_idx in range(0, S_target, chunksize):
-            end_idx = min(cur_idx + chunksize, S_target)
-            cur_ray_conditions = ray_conditions[:, cur_idx:end_idx, :, :, :]
-            aggregated_tokens_list, patch_start_idx, state_list = self.aggregator.render(ray_conditions=cur_ray_conditions, info=info)
-
-            predictions = {}
-            with torch.amp.autocast(device_type='cuda', enabled=False):
-                # Create dummy images tensor with correct shape for target views
-                nvs_dummy_images = torch.zeros(B, end_idx - cur_idx, C, H, W, dtype=ray_conditions.dtype, device=ray_conditions.device)
-                nvs, nvs_conf = self.nvs_head(
-                    aggregated_tokens_list, images=nvs_dummy_images, patch_start_idx=patch_start_idx
-                )
-                NVS_prediction_list.append(nvs)
-                NVS_prediction_conf_list.append(nvs_conf)
-        predictions["nvs_pred"] = torch.cat(NVS_prediction_list, dim=1)
-        predictions["nvs_depth_conf"] = torch.cat(NVS_prediction_conf_list, dim=1)
-
-        return predictions

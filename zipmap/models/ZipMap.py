@@ -207,10 +207,10 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
         input_view_conditions = None
         query_conditions = None
         if self.nvs_input_type == "unposed_ray":
-            query_conditions = query_info["target_ray_cond"]
+            query_conditions = query_info["nvs_target_ray_cond"]
         elif self.nvs_input_type == "posed_ray":
             input_view_conditions = query_info.get("input_ray_cond", None)
-            query_conditions = query_info["target_ray_cond"]
+            query_conditions = query_info["nvs_target_ray_cond"]
 
         aggregator_query_conditions = {
             "cond_type": self.nvs_input_type,
