@@ -24,7 +24,7 @@
 ```
 
 ## Updates
-- **2026-04-15**: Released ZipMap with state query support.
+- **2026-04-15**: Released ZipMap with state query support and quantitative evaluation code.
 - **2026-04-14**: Released the streaming version of ZipMap along with its training and demo scripts.
 - **2026-04-12**: Released code, checkpoints, and the interactive Gradio demo for ZipMap main model.
 - **2026-02**: ZipMap accepted to CVPR 2026.
@@ -73,7 +73,7 @@ TORCH_COMPILE_DISABLE=1 python demo_gradio_zipmap_streaming.py --ckpt_path /path
 </details>
 
 ### 2.3 Quantitative Evaluation
-[**TODO**] See branch `evaluation` for code and instructions on how to run the quantitative evaluation.
+See branch `evaluation` for code and instructions on how to run the quantitative evaluation and runtime measurements. Our evaluation code is heavily built on top of [this repository](https://github.com/ZhouTimeMachine/recons_eval) provided by the authors of [Pi3](https://github.com/yyfz/Pi3). We sincerely thank the authors for their open-source contributions.
 
 ## 3. Training
 We train our model with FSDP (Fully Sharded Data Parallel) using GPUs with 80GB memory. If you have access to such hardware, you can run the training with the provided configs. If not, you can modify the configs to fit your hardware (e.g., by reducing batch size and using more aggressive FSDP sharding strategies).

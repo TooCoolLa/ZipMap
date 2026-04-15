@@ -362,9 +362,8 @@ class Aggregator(nn.Module):
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
-
+            # save memory by only storing features needed by DPT head (similar finding has also been adopted by prior work FastVGGT)
             if cur_block_num in block4DPT_idx:
-                # save memory by only keeping intermediates needed by DPT head
                 for i in range(len(frame_intermediates)):
                     concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                     output_list.append(concat_inter)
@@ -441,7 +440,8 @@ class Aggregator(nn.Module):
 
 
             if cur_block_num in block4DPT_idx:
-                # save memory by only keeping intermediates needed by DPT head
+                # save memory by only storing features needed by DPT head
+                # similar finding has also been adopted by prior work FastVGGT
                 for i in range(len(frame_intermediates)):
                     concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                     output_list.append(concat_inter)
