@@ -57,7 +57,8 @@ If using the checkpoint with reference view specification, you disable the affin
 We also provide scripts to run the demo for the streaming version of ZipMap. 
 <details>
 <summary>Expand to see:</summary>
-The torch.compile for streaming version of ZipMap takes significant time, please disable torch.compile by setting the environment variable `TORCH_COMPILE_DISABLE=1` before launching the demo:
+
+The `torch.compile` takes significant time for streaming version of ZipMap. For inference usage, please disable `torch.compile` by setting `TORCH_COMPILE_DISABLE=1` before launching the demo:
 
 ```bash
 TORCH_COMPILE_DISABLE=1 python demo_gradio_zipmap_streaming.py --ckpt_path /path/to/your/online_checkpoint.pt
