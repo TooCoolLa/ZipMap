@@ -8,7 +8,6 @@
 #         https://github.com/naver-ai/rope-vit
 
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

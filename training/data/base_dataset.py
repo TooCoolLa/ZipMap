@@ -64,10 +64,6 @@ class BaseDataset(Dataset):
             Dataset item as returned by get_data()
         """
         seq_index, img_per_seq, aspect_ratio = idx_N
-        # TODO: remove this; this is for testing IO
-        # seq_index = idx_N
-        # img_per_seq = 24
-        # aspect_ratio = 1.0
 
         return self.get_data(
             seq_index=seq_index, img_per_seq=img_per_seq, aspect_ratio=aspect_ratio

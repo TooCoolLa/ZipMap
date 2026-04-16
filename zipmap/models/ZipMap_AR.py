@@ -95,19 +95,6 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
             store_state (bool, optional): Whether to store the TTT state for future queries.
             window_size (int, optional): Window size (frame number) for TTT operations. Default is None.
 
-        Returns:
-            dict: A dictionary containing the following predictions:
-                - pose_enc (torch.Tensor): Camera pose encoding with shape [B, S, 9] (from the last iteration)
-                - depth (torch.Tensor): Predicted depth maps with shape [B, S, H, W, 1]
-                - depth_conf (torch.Tensor): Confidence scores for depth predictions with shape [B, S, H, W]
-                - world_points (torch.Tensor): 3D world coordinates for each pixel with shape [B, S, H, W, 3]
-                - world_points_conf (torch.Tensor): Confidence scores for world points with shape [B, S, H, W]
-                - images (torch.Tensor): Original input images, preserved for visualization
-
-                If query_points is provided, also includes:
-                - track (torch.Tensor): Point tracks with shape [B, S, N, 2] (from the last iteration), in pixel coordinates
-                - vis (torch.Tensor): Visibility scores for tracked points with shape [B, S, N]
-                - conf (torch.Tensor): Confidence scores for tracked points with shape [B, S, N]
         """        
         # If without batch dimension, add it
         if len(images.shape) == 4:
@@ -138,7 +125,6 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
 
         predictions = {}
         with torch.amp.autocast(device_type='cuda', enabled=False):
-        # camera_head, camera_head, and point head used to be under "with"
             if self.camera_head is not None:
                 pose_enc_list = self.camera_head(input_img_aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration

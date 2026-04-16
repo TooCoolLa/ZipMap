@@ -16,10 +16,7 @@ import math
 from easydict import EasyDict as edict
 import warnings
 import lpips
-from einops import rearrange, repeat
-# ---------------------------------------------------------------------------
-# Some functions from MoGe
-# ---------------------------------------------------------------------------
+from einops import rearrange
 
 
 HIGH_QUALITY_DATASETS = ['aria_syn_envir','gta_sfm', 'mvs_synth', 'hypersim', 'matrixcity', 'midair', 'tartanair', 'tartanairv2', 'unreal4k', 'virtual_kitti', 'omniworld_game', 'pointodyssey', 'scenenet', 'dynamic_replica', 'bedlam', 'spring', 'kubric']
@@ -100,10 +97,6 @@ class NVS_Loss(nn.Module):
                 lpips_loss = self.lpips_loss_module(
                     rendering * 2.0 - 1.0, target.detach() * 2.0 - 1.0
                 ).mean()
-
-        # perceptual_loss = torch.tensor(0.0).to(l2_loss.device)
-        # if self.config.training.perceptual_loss_weight > 0.0:
-        #     perceptual_loss = self.perceptual_loss_module(rendering, target)
 
 
         loss = (
@@ -429,7 +422,6 @@ def compute_camera_loss(
         print(f"Warning: {len(invalid_seq_names)} samples have less than 50 valid points. They are: {invalid_seq_names}")
 
         # print per view valid point number for the invalid samples
-        B, N, H, W = point_masks.shape
         valid_points_per_sample = point_masks.sum(dim=[-2, -1]) # (B, N)
         invalid_sample_indices = (~has_valid_points).nonzero(as_tuple=True)[0]
         for i in invalid_sample_indices:

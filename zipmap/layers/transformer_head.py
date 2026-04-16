@@ -87,7 +87,6 @@ class BlockRope(nn.Module):
         rope=None
     ) -> None:
         super().__init__()
-        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
         self.norm1 = norm_layer(dim)
         self.attn = attn_class(
             dim,
