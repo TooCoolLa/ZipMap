@@ -93,14 +93,24 @@ def main():
             c2w = np.linalg.inv(w2c)
             
             # Match image
-            img_name = os.path.basename(path).replace(".npz", "")
-            img_matches = glob.glob(os.path.join(args.image_dir, img_name + ".*"))
+            # Case 1: path is frame_0001.npz -> img_name is frame_0001
+            # Case 2: path is frame_0001.jpg.npz -> img_name is frame_0001.jpg
+            full_name = os.path.basename(path).replace(".npz", "")
             
-            if not img_matches:
-                print(f"Warning: Could not find image for {img_name} in {args.image_dir}. Skipping frame.")
-                continue
+            # Try direct match first (for case 2)
+            img_path_direct = os.path.join(args.image_dir, full_name)
+            if os.path.exists(img_path_direct):
+                img_path = img_path_direct
+            else:
+                # Try glob match (for case 1 or cases with different extensions)
+                base_name = os.path.splitext(full_name)[0]
+                img_matches = glob.glob(os.path.join(args.image_dir, full_name + "*")) + \
+                              glob.glob(os.path.join(args.image_dir, base_name + ".*"))
                 
-            img_path = img_matches[0]
+                if not img_matches:
+                    print(f"Warning: Could not find image for {full_name} in {args.image_dir}. Skipping frame.")
+                    continue
+                img_path = img_matches[0]
             
             data_cache.append({
                 "c2w": c2w,
