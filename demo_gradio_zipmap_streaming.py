@@ -60,6 +60,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--ckpt_path', type=str, default="./checkpoints/checkpoint_online.pt", help='Path to the model checkpoint')
 parser.add_argument('--ema', action='store_true', help='Use EMA weights if available')
 parser.add_argument('--align_first_view', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True, help='Align output point cloud to the first view coordinate system (default: True)')
+parser.add_argument('--image_dir', '-i', type=str, default=None, help='Path to local image directory')
 args = parser.parse_args()
 
 model = ZipMap(**model_config)
@@ -85,11 +86,11 @@ model = model.to(device)
 # -------------------------------------------------------------------------
 # 1) Core model inference (Streaming)
 # -------------------------------------------------------------------------
-def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None, img_queue_size=200, save_queue_size=80) -> dict:
+def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None, img_queue_size=200, save_queue_size=80, batch_size=1, window_size=1) -> dict:
     """
     Run the ZipMap model on images in the 'target_dir/images' folder using streaming multi-threading.
     """
-    print(f"Streaming processing images from {target_dir}")
+    print(f"Streaming processing images from {target_dir} with batch_size={batch_size}, window_size={window_size}")
     if num_save_threads is None:
         num_save_threads = max(1, os.cpu_count() - 2)
 
@@ -133,76 +134,100 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
     # Inference loop
     processed_count = 0
     while processed_count < len(image_names):
-        data = image_queue.get()
-        if data is None:
+        batch_data = []
+        # Collect up to batch_size frames
+        for _ in range(batch_size):
+            if processed_count >= len(image_names):
+                break
+            data = image_queue.get()
+            if data is None: 
+                break
+            batch_data.append(data)
+            processed_count += 1
+        
+        if not batch_data:
             break
         
-        image_tensor = data["tensor"].to(device)
-        image_path = data["path"]
+        # Concatenate [1, 1, 3, H, W] into [1, S, 3, H, W]
+        batch_tensors = [d["tensor"] for d in batch_data]
+        images = torch.cat(batch_tensors, dim=1).to(device)
         
+        # Run inference
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=dtype):
-                # Process one frame at a time, passing the state_list
-                predictions = model(image_tensor, store_state=True, state_list=current_state_list)
+                predictions = model(images, store_state=True, window_size=window_size, state_list=current_state_list)
                 current_state_list = predictions["state_list"]
         
-        # Post-processing: Pose
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], image_tensor.shape[-2:])
+        # Post-processing: Pose (supports BxSx... format)
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         
-        # Convert tensors to numpy
-        extrinsic_np = extrinsic.cpu().float().numpy().squeeze(0)  # (3, 4)
-        intrinsic_np = intrinsic.cpu().float().numpy().squeeze(0)  # (3, 3)
+        # Convert tensors to numpy and remove batch dim (result: [S, ...])
+        extrinsic_all = extrinsic.cpu().float().numpy().squeeze(0)
+        intrinsic_all = intrinsic.cpu().float().numpy().squeeze(0)
+        depth_all = predictions["depth"].cpu().float().numpy().squeeze(0)
+        depth_conf_all = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if "depth_conf" in predictions else [None] * len(batch_data)
         
-        if args.align_first_view:
-            extrinsic_homog = np.eye(4)
-            extrinsic_homog[:3, :] = extrinsic_np
-            if first_cam_inv is None:
-                first_cam_inv = closed_form_inverse_se3(extrinsic_homog[None])[0]
-            
-            new_extrinsic_homog = extrinsic_homog @ first_cam_inv
-            extrinsic_np = new_extrinsic_homog[:3, :]
-
-        # Depth map
-        depth_map = predictions["depth"].cpu().float().numpy().squeeze(0)
-        depth_conf = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if "depth_conf" in predictions else None
-        
-        # World points from depth
-        world_points_from_depth = unproject_depth_map_to_point_map(
-            depth_map[None], extrinsic_np[None], intrinsic_np[None]
-        ).squeeze(0)
-        
-        res_to_save = {
-            "extrinsic": extrinsic_np,
-            "intrinsic": intrinsic_np,
-            "depth": depth_map,
-            "depth_conf": depth_conf,
-            "world_points_from_depth": world_points_from_depth,
-            "images": image_tensor.cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
-        }
-        
+        local_points_all = None
+        local_points_conf_all = None
         if "local_points" in predictions:
-            local_points = predictions["local_points"].cpu().float().numpy().squeeze(0)
-            local_points_conf = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if "local_points_conf" in predictions else None
-            
-            extrinsic_homog = np.eye(4)
-            extrinsic_homog[:3, :] = extrinsic_np
-            cam_to_world = closed_form_inverse_se3(extrinsic_homog[None])[0]
-            
-            world_points = np.einsum('ij, hwj -> hwi', cam_to_world, homogenize_points(local_points))
-            res_to_save["world_points"] = world_points[..., :3]
-            res_to_save["world_points_conf"] = local_points_conf
-            res_to_save["local_points"] = local_points
+            local_points_all = predictions["local_points"].cpu().float().numpy().squeeze(0)
+            local_points_conf_all = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if "local_points_conf" in predictions else [None] * len(batch_data)
 
-        # Save individual frame
-        save_path = os.path.join(target_dir, "predictions", f"{os.path.basename(image_path)}.npz")
-        save_queue.put({"predictions": res_to_save, "save_path": save_path})
-        
-        # Accumulate for return (compatibility with existing visualization)
-        for k, v in res_to_save.items():
-            all_predictions[k].append(v)
-        
-        processed_count += 1
-        image_queue.task_done()
+        # Extract results for each frame in the batch
+        for i in range(len(batch_data)):
+            image_path = batch_data[i]["path"]
+            image_tensor_single = batch_data[i]["tensor"]
+            
+            curr_extrinsic = extrinsic_all[i]
+            curr_intrinsic = intrinsic_all[i]
+            curr_depth = depth_all[i]
+            curr_depth_conf = depth_conf_all[i]
+
+            if args.align_first_view:
+                extrinsic_homog = np.eye(4)
+                extrinsic_homog[:3, :] = curr_extrinsic
+                if first_cam_inv is None:
+                    first_cam_inv = closed_form_inverse_se3(extrinsic_homog[None])[0]
+                
+                new_extrinsic_homog = extrinsic_homog @ first_cam_inv
+                curr_extrinsic = new_extrinsic_homog[:3, :]
+
+            # World points from depth
+            world_points_from_depth = unproject_depth_map_to_point_map(
+                curr_depth[None], curr_extrinsic[None], curr_intrinsic[None]
+            ).squeeze(0)
+            
+            res_to_save = {
+                "extrinsic": curr_extrinsic,
+                "intrinsic": curr_intrinsic,
+                "depth": curr_depth,
+                "depth_conf": curr_depth_conf,
+                "world_points_from_depth": world_points_from_depth,
+                "images": image_tensor_single.cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
+            }
+            
+            if local_points_all is not None:
+                curr_local_points = local_points_all[i]
+                curr_local_points_conf = local_points_conf_all[i]
+                
+                extrinsic_homog = np.eye(4)
+                extrinsic_homog[:3, :] = curr_extrinsic
+                cam_to_world = closed_form_inverse_se3(extrinsic_homog[None])[0]
+                
+                world_points = np.einsum('ij, hwj -> hwi', cam_to_world, homogenize_points(curr_local_points))
+                res_to_save["world_points"] = world_points[..., :3]
+                res_to_save["world_points_conf"] = curr_local_points_conf
+                res_to_save["local_points"] = curr_local_points
+
+            # Save individual frame
+            save_path = os.path.join(target_dir, "predictions", f"{os.path.basename(image_path)}.npz")
+            save_queue.put({"predictions": res_to_save, "save_path": save_path})
+            
+            # Accumulate for return (compatibility with existing visualization)
+            for k, v in res_to_save.items():
+                all_predictions[k].append(v)
+            
+            image_queue.task_done()
         
     # Cleanup
     for _ in range(num_save_threads):
@@ -336,6 +361,8 @@ def gradio_demo(
     img_queue_size=200,
     save_threads=None,
     save_queue_size=80,
+    batch_size=1,
+    window_size=1,
 ):
     """
     Perform reconstruction using the already-created target_dir/images.
@@ -361,7 +388,9 @@ def gradio_demo(
             num_load_threads=int(loading_threads), 
             num_save_threads=int(save_threads) if save_threads is not None else None,
             img_queue_size=int(img_queue_size),
-            save_queue_size=int(save_queue_size)
+            save_queue_size=int(save_queue_size),
+            batch_size=int(batch_size),
+            window_size=int(window_size)
         )
 
     # Handle None frame_filter
@@ -512,6 +541,20 @@ walkthrough_video = "examples/videos/walkthrough.mp4"
 # -------------------------------------------------------------------------
 # 6) Build Gradio UI
 # -------------------------------------------------------------------------
+
+# Initial values for Gradio components
+initial_target_dir = "None"
+initial_image_paths = None
+initial_log_msg = "Please upload a video or images, then click Reconstruct."
+
+if args.image_dir and os.path.isdir(args.image_dir):
+    image_files = sorted([os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
+                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+    if image_files:
+        print(f"Pre-loading {len(image_files)} images from {args.image_dir}")
+        initial_target_dir, initial_image_paths = handle_uploads(None, image_files)
+        initial_log_msg = f"Pre-loaded {len(image_files)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+
 theme = gr.themes.Ocean()
 theme.set(
     checkbox_label_background_fill_selected="*button_primary_background_fill",
@@ -597,7 +640,7 @@ with gr.Blocks(
     """
     )
 
-    target_dir_output = gr.Textbox(label="Target Dir", visible=False, value="None")
+    target_dir_output = gr.Textbox(label="Target Dir", visible=False, value=initial_target_dir)
 
     with gr.Row():
         with gr.Column(scale=2):
@@ -642,6 +685,22 @@ with gr.Blocks(
                 step=10
             )
 
+            with gr.Row():
+                batch_size = gr.Slider(
+                    label="Inference Batch Size",
+                    minimum=1,
+                    maximum=16,
+                    value=1,
+                    step=1
+                )
+                window_size = gr.Slider(
+                    label="TTT Window Size",
+                    minimum=1,
+                    maximum=16,
+                    value=1,
+                    step=1
+                )
+
             image_gallery = gr.Gallery(
                 label="Preview",
                 columns=4,
@@ -649,13 +708,14 @@ with gr.Blocks(
                 show_download_button=True,
                 object_fit="contain",
                 preview=True,
+                value=initial_image_paths
             )
 
         with gr.Column(scale=4):
             with gr.Column():
                 gr.Markdown("**3D Reconstruction (Point Cloud and Camera Poses)**")
                 log_output = gr.Markdown(
-                    "Please upload a video or images, then click Reconstruct.", elem_classes=["custom-log"]
+                    initial_log_msg, elem_classes=["custom-log"]
                 )
                 reconstruction_output = gr.Model3D(height=520, zoom_speed=0.5, pan_speed=0.5, camera_position=(-90, 90, 3.0))
 
@@ -687,14 +747,14 @@ with gr.Blocks(
 
     # ---------------------- Examples section ----------------------
     examples = [
-        [Istanbul_video, "44", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        # [sora_big_sur_video, "19", None, 3.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [pyramid_video, "30", None, 1.0, 35.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [room_video, "8", None, 1.0, 5.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [dl3dv_video, "29", None, 2.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
-        [kitchen_video, "29", None, 2.0, 40.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
-        [figureskating_video, "14", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5],
-        [single_cartoon_video, "1", None, 1.0, 15.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0],
+        [Istanbul_video, "44", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
+        # [sora_big_sur_video, "19", None, 3.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
+        [pyramid_video, "30", None, 1.0, 35.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
+        [room_video, "8", None, 1.0, 5.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
+        [dl3dv_video, "29", None, 2.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5, 1, 1],
+        [kitchen_video, "29", None, 2.0, 40.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
+        [figureskating_video, "14", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5, 1, 1],
+        [single_cartoon_video, "1", None, 1.0, 15.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
 
     ]
 
@@ -711,7 +771,8 @@ with gr.Blocks(
         prediction_mode,
         is_example_str,
         cam_size_factor=1.0,
-
+        batch_size=1,
+        window_size=1,
     ):
         """
         1) Copy example images to new target_dir
@@ -723,7 +784,8 @@ with gr.Blocks(
         # Always use "All" for frame_filter in examples
         frame_filter = "All"
         glbfile, log_msg, dropdown = gradio_demo(
-            target_dir, conf_thres, frame_filter, mask_black_bg, mask_white_bg, show_cam, mask_sky, prediction_mode, cam_size_factor
+            target_dir, conf_thres, frame_filter, mask_black_bg, mask_white_bg, show_cam, mask_sky, prediction_mode, cam_size_factor,
+            batch_size=batch_size, window_size=window_size
         )
         return glbfile, log_msg, target_dir, dropdown, image_paths
 
@@ -744,7 +806,8 @@ with gr.Blocks(
             prediction_mode,
             is_example,
             cam_size_factor,
-
+            batch_size,
+            window_size,
         ],
         outputs=[reconstruction_output, log_output, target_dir_output, frame_filter, image_gallery],
         fn=example_pipeline,
@@ -777,6 +840,8 @@ with gr.Blocks(
             img_queue_size,
             save_threads,
             save_queue_size,
+            batch_size,
+            window_size,
         ],
         outputs=[reconstruction_output, log_output, frame_filter],
     ).then(
