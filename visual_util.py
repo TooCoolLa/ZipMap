@@ -105,6 +105,8 @@ def predictions_to_glb(
                 )
 
             for i, image_name in enumerate(image_list):
+                if i >= S:
+                    break
                 image_filepath = os.path.join(target_dir_images, image_name)
                 mask_filepath = os.path.join(target_dir, "sky_masks", image_name)
 

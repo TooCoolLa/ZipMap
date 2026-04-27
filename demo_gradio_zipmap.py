@@ -395,7 +395,15 @@ def update_visualization(
     ]
 
     loaded = np.load(predictions_path)
-    predictions = {key: np.array(loaded[key]) for key in key_list if key in loaded}
+    if frame_filter == "All" or frame_filter is None:
+        predictions = {key: np.array(loaded[key]) for key in key_list if key in loaded}
+    else:
+        # Extract the index part before the colon, e.g., "5: image005.png" -> 5
+        try:
+            selected_frame_idx = int(frame_filter.split(":")[0])
+            predictions = {key: np.array(loaded[key])[selected_frame_idx : selected_frame_idx + 1] for key in key_list if key in loaded}
+        except (ValueError, IndexError):
+            predictions = {key: np.array(loaded[key]) for key in key_list if key in loaded}
 
     glbfile = os.path.join(
         target_dir,
@@ -406,7 +414,7 @@ def update_visualization(
         glbscene = predictions_to_glb(
             predictions,
             conf_thres=conf_thres,
-            filter_by_frames=frame_filter,
+            filter_by_frames="All", # Fixed: since data is already filtered
             mask_black_bg=mask_black_bg,
             mask_white_bg=mask_white_bg,
             show_cam=show_cam,

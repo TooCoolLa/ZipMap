@@ -41,6 +41,8 @@ import glob
 import gc
 import time
 import argparse 
+import queue
+import collections
 sys.path.append("zipmap/")
 
 from visual_util import predictions_to_glb
@@ -48,6 +50,7 @@ from zipmap.models.ZipMap_AR import ZipMap
 from zipmap.utils.load_fn import load_and_preprocess_images
 from zipmap.utils.pose_enc import pose_encoding_to_extri_intri
 from zipmap.utils.geometry import unproject_depth_map_to_point_map, closed_form_inverse_se3, homogenize_points
+from zipmap.utils.streaming_utils import ImageLoaderWorker, ResultSaverWorker
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -80,90 +83,140 @@ model = model.to(device)
 
 
 # -------------------------------------------------------------------------
-# 1) Core model inference
+# 1) Core model inference (Streaming)
 # -------------------------------------------------------------------------
-def run_model(target_dir, model) -> dict:
+def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None) -> dict:
     """
-    Run the ZipMap model on images in the 'target_dir/images' folder and return predictions.
-    Args:
-        target_dir: Directory containing the images subfolder
-        model: The ZipMap model
+    Run the ZipMap model on images in the 'target_dir/images' folder using streaming multi-threading.
     """
-    print(f"Processing images from {target_dir}")
-
-    # Device check
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if not torch.cuda.is_available():
-        raise ValueError("CUDA is not available. Check your environment.")
+    print(f"Streaming processing images from {target_dir}")
+    if num_save_threads is None:
+        num_save_threads = max(1, os.cpu_count() - 2)
 
     # Move model to device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
     model.eval()
 
-    # Load and preprocess images
+    # Get image paths
     image_names = glob.glob(os.path.join(target_dir, "images", "*"))
     image_names = sorted(image_names)
     print(f"Found {len(image_names)} images")
     if len(image_names) == 0:
         raise ValueError("No images found. Check your upload.")
 
-    images = load_and_preprocess_images(image_names).to(device)
-    print(f"Preprocessed images shape: {images.shape}")
+    # Setup queues
+    path_queue = queue.Queue()
+    for p in image_names:
+        path_queue.put(p)
+    for _ in range(num_load_threads):
+        path_queue.put(None)  # poison pills for loaders
 
-    # Run inference
-    print("Running inference...")
+    image_queue = queue.Queue(maxsize=200)
+    save_queue = queue.Queue(maxsize=80)
+
+    # Start workers
+    loaders = [ImageLoaderWorker(path_queue, image_queue) for _ in range(num_load_threads)]
+    savers = [ResultSaverWorker(save_queue) for _ in range(num_save_threads)]
+
+    for w in loaders + savers:
+        w.start()
+
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    with torch.no_grad():
-        with torch.amp.autocast("cuda", dtype=dtype):
-            predictions = model(images)
+    first_cam_inv = None
+    all_predictions = collections.defaultdict(list)
+    current_state_list = None
+    
+    # Ensure predictions directory exists
+    os.makedirs(os.path.join(target_dir, "predictions"), exist_ok=True)
 
-    # Convert pose encoding to extrinsic and intrinsic matrices
-    print("Converting pose encoding to extrinsic and intrinsic matrices...")
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
-    predictions["extrinsic"] = extrinsic
-    predictions["intrinsic"] = intrinsic
+    # Inference loop
+    processed_count = 0
+    while processed_count < len(image_names):
+        data = image_queue.get()
+        if data is None:
+            break
+        
+        image_tensor = data["tensor"].to(device)
+        image_path = data["path"]
+        
+        with torch.no_grad():
+            with torch.amp.autocast("cuda", dtype=dtype):
+                # Process one frame at a time, passing the state_list
+                predictions = model(image_tensor, store_state=True, state_list=current_state_list)
+                current_state_list = predictions["state_list"]
+        
+        # Post-processing: Pose
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], image_tensor.shape[-2:])
+        
+        # Convert tensors to numpy
+        extrinsic_np = extrinsic.cpu().float().numpy().squeeze(0)  # (3, 4)
+        intrinsic_np = intrinsic.cpu().float().numpy().squeeze(0)  # (3, 3)
+        
+        if args.align_first_view:
+            extrinsic_homog = np.eye(4)
+            extrinsic_homog[:3, :] = extrinsic_np
+            if first_cam_inv is None:
+                first_cam_inv = closed_form_inverse_se3(extrinsic_homog[None])[0]
+            
+            new_extrinsic_homog = extrinsic_homog @ first_cam_inv
+            extrinsic_np = new_extrinsic_homog[:3, :]
 
-    # Convert tensors to numpy
-    for key in predictions.keys():
-        if isinstance(predictions[key], torch.Tensor):
-            predictions[key] = predictions[key].cpu().float().numpy().squeeze(0)  # remove batch dimension
-    predictions['pose_enc_list'] = None # remove pose_enc_list
-    predictions['pose_enc_mlp_list'] = None
+        # Depth map
+        depth_map = predictions["depth"].cpu().float().numpy().squeeze(0)
+        depth_conf = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if "depth_conf" in predictions else None
+        
+        # World points from depth
+        world_points_from_depth = unproject_depth_map_to_point_map(
+            depth_map[None], extrinsic_np[None], intrinsic_np[None]
+        ).squeeze(0)
+        
+        res_to_save = {
+            "extrinsic": extrinsic_np,
+            "intrinsic": intrinsic_np,
+            "depth": depth_map,
+            "depth_conf": depth_conf,
+            "world_points_from_depth": world_points_from_depth,
+            "images": image_tensor.cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
+        }
+        
+        if "local_points" in predictions:
+            local_points = predictions["local_points"].cpu().float().numpy().squeeze(0)
+            local_points_conf = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if "local_points_conf" in predictions else None
+            
+            extrinsic_homog = np.eye(4)
+            extrinsic_homog[:3, :] = extrinsic_np
+            cam_to_world = closed_form_inverse_se3(extrinsic_homog[None])[0]
+            
+            world_points = np.einsum('ij, hwj -> hwi', cam_to_world, homogenize_points(local_points))
+            res_to_save["world_points"] = world_points[..., :3]
+            res_to_save["world_points_conf"] = local_points_conf
+            res_to_save["local_points"] = local_points
 
-    # Align all cameras (and subsequent world points) to the first view's coordinate frame
-    if args.align_first_view:
-        print("Aligning to first view coordinate frame...")
-        S_frames = predictions["extrinsic"].shape[0]
-        extrinsics_homog = np.concatenate(
-            [predictions["extrinsic"], np.zeros((S_frames, 1, 4), dtype=predictions["extrinsic"].dtype)],
-            axis=-2,
-        )  # (S, 4, 4)
-        extrinsics_homog[:, -1, -1] = 1.0
-        first_cam_inv = closed_form_inverse_se3(extrinsics_homog[0:1])[0]  # (4, 4)
-        new_extrinsics_homog = extrinsics_homog @ first_cam_inv  # (S, 4, 4)
-        predictions["extrinsic"] = new_extrinsics_homog[:, :3, :]  # (S, 3, 4)
-    else:
-        print("Not aligning to first view coordinate frame. Output will be in the original camera coordinate system predicted by the model.")
-
-    # Generate world points from depth map
-    print("Computing world points from depth map...")
-    depth_map = predictions["depth"]  # (S, H, W, 1)
-
-    world_points_from_depth = unproject_depth_map_to_point_map(depth_map, predictions["extrinsic"], predictions["intrinsic"])
-    predictions["world_points_from_depth"] = world_points_from_depth
-
-    world_points_from_local_points = None
-    if "local_points" in predictions:
-        local_points = predictions["local_points"]  # (S, H, W, 3)
-        local_points_conf = predictions["depth_conf"]  # (S, H, W)
-        cam_to_world_extrinsic = closed_form_inverse_se3(predictions["extrinsic"]) # (S, 4, 4)
-        world_points_from_local_points = np.einsum('sij, shwj -> shwi', cam_to_world_extrinsic, homogenize_points(local_points))
-        predictions["world_points"] = world_points_from_local_points[..., :3]
-        predictions["world_points_conf"] = local_points_conf
-
-    # Clean up
+        # Save individual frame
+        save_path = os.path.join(target_dir, "predictions", f"{os.path.basename(image_path)}.npz")
+        save_queue.put({"predictions": res_to_save, "save_path": save_path})
+        
+        # Accumulate for return (compatibility with existing visualization)
+        for k, v in res_to_save.items():
+            all_predictions[k].append(v)
+        
+        processed_count += 1
+        image_queue.task_done()
+        
+    # Cleanup
+    for _ in range(num_save_threads):
+        save_queue.put(None)
+    for w in loaders + savers:
+        w.join()
+        
+    # Stack accumulated results
+    final_predictions = {}
+    for k, v in all_predictions.items():
+        final_predictions[k] = np.stack(v, axis=0)
+    
     torch.cuda.empty_cache()
-    return predictions
+    return final_predictions
 
 
 # -------------------------------------------------------------------------
@@ -296,13 +349,9 @@ def gradio_demo(
     all_files = [f"{i}: {filename}" for i, filename in enumerate(all_files)]
     frame_filter_choices = ["All"] + all_files
 
-    print("Running run_model...")
+    print("Running run_model_streaming...")
     with torch.no_grad():
-        predictions = run_model(target_dir, model)
-
-    # Save predictions
-    prediction_save_path = os.path.join(target_dir, "predictions.npz")
-    np.savez(prediction_save_path, **predictions)
+        predictions = run_model_streaming(target_dir, model)
 
     # Handle None frame_filter
     if frame_filter is None:
@@ -375,24 +424,39 @@ def update_visualization(
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         return None, "No reconstruction available. Please click the Reconstruct button first."
 
-    predictions_path = os.path.join(target_dir, "predictions.npz")
-    if not os.path.exists(predictions_path):
-        return None, f"No reconstruction available at {predictions_path}. Please run 'Reconstruct' first."
+    predictions_dir = os.path.join(target_dir, "predictions")
+    if not os.path.exists(predictions_dir):
+        return None, f"No predictions directory found at {predictions_dir}. Please run 'Reconstruct' first."
 
-    key_list = [
-        "pose_enc",
-        "depth",
-        "depth_conf",
-        "world_points",
-        "world_points_conf",
-        "images",
-        "extrinsic",
-        "intrinsic",
-        "world_points_from_depth",
-    ]
+    # Decide which files to load
+    if frame_filter == "All" or frame_filter is None:
+        npz_files = sorted(glob.glob(os.path.join(predictions_dir, "*.npz")))
+    else:
+        # Extract filename from "5: image005.png"
+        try:
+            filename = frame_filter.split(": ", 1)[1]
+            npz_files = [os.path.join(predictions_dir, f"{filename}.npz")]
+        except (IndexError, ValueError):
+            return None, f"Invalid frame filter format: {frame_filter}"
 
-    loaded = np.load(predictions_path)
-    predictions = {key: np.array(loaded[key]) for key in key_list if key in loaded}
+    if not npz_files:
+        return None, f"No prediction files found in {predictions_dir} matching {frame_filter}."
+
+    # Load and aggregate
+    all_preds = collections.defaultdict(list)
+    for f in npz_files:
+        if not os.path.exists(f):
+            continue
+        data = np.load(f)
+        for k in data.files:
+            all_preds[k].append(data[k])
+        data.close()
+
+    if not all_preds:
+        return None, "Failed to load any prediction data."
+
+    # Stack along sequence dimension
+    predictions = {k: np.stack(v, axis=0) for k, v in all_preds.items()}
 
     glbfile = os.path.join(
         target_dir,
@@ -403,7 +467,7 @@ def update_visualization(
         glbscene = predictions_to_glb(
             predictions,
             conf_thres=conf_thres,
-            filter_by_frames=frame_filter,
+            filter_by_frames="All", # Fixed: since data is already filtered
             mask_black_bg=mask_black_bg,
             mask_white_bg=mask_white_bg,
             show_cam=show_cam,
