@@ -155,40 +155,45 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
     # Inference loop
     processed_count = 0
     
-    # Use Gradio progress if available, otherwise fallback to tqdm
+    # Use Gradio progress if available
     if progress is not None:
-        pbar = progress.tqdm(image_names, desc="Processing")
-    else:
-        pbar = tqdm(total=len(image_names), desc="Processing")
+        progress(0, desc="Starting streaming inference...")
 
     while processed_count < len(image_names):
+        # 1) Collect batch
         batch_data = []
-        # Collect up to batch_size frames
         for _ in range(batch_size):
             if processed_count >= len(image_names):
                 break
-            data = image_queue.get()
-            if data is None: 
+            # Use timeout to avoid eternal blocking if loaders fail
+            try:
+                data = image_queue.get(timeout=10)
+                batch_data.append(data)
+                processed_count += 1
+            except queue.Empty:
+                print(f"DEBUG: Main loop waiting for images... (Current: {processed_count}/{len(image_names)})")
                 break
-            batch_data.append(data)
-            processed_count += 1
         
         if not batch_data:
-            break
+            if processed_count >= len(image_names): break
+            continue
         
-        # Construct [1, S, 3, H, W] from list of [1, 3, H, W]
+        print(f"DEBUG: Batch collected ({len(batch_data)} frames). Moving to GPU...")
+        # 2) Data transfer
         batch_tensors = [d["tensor"] for d in batch_data]
         images = torch.cat([t.unsqueeze(1) for t in batch_tensors], dim=1).to(device)
         
-        # Run inference
+        # 3) Run inference
+        print(f"DEBUG: Running model forward pass (TTT mode)...")
         t0 = time.time()
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=dtype):
                 predictions = model(images, store_state=True, window_size=window_size, state_list=current_state_list)
                 current_state_list = predictions["state_list"]
         t1 = time.time()
+        print(f"DEBUG: Inference finished in {t1-t0:.3f}s. Post-processing on GPU...")
         
-        # Post-processing on GPU (Batched)
+        # 4) Post-processing (Batched on GPU)
         with torch.no_grad():
             extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
             
@@ -202,7 +207,6 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
                     first_cam_inv = closed_form_inverse_se3(extrinsic_homog[:, 0]) # (B, 4, 4)
                 
                 # Apply first_cam_inv to all
-                # (B, S, 4, 4) @ (B, 1, 4, 4) -> (B, S, 4, 4)
                 new_extrinsic_homog = torch.matmul(extrinsic_homog, first_cam_inv.unsqueeze(1))
                 extrinsic = new_extrinsic_homog[:, :, :3, :]
 
@@ -225,7 +229,8 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
                 wp_h_flat = torch.matmul(cam_to_world, lp_h_flat) # (BS, 4, HW)
                 world_points = wp_h_flat.transpose(-1, -2).view(B, S, H, W, 4)[..., :3]
 
-        # Final move to CPU and numpy
+        # 5) Move to CPU & Save
+        print(f"DEBUG: Copying results to CPU and queuing for save...")
         extrinsic_np = extrinsic.cpu().float().numpy().squeeze(0)
         intrinsic_np = intrinsic.cpu().float().numpy().squeeze(0)
         depth_np = predictions["depth"].cpu().float().numpy().squeeze(0)
@@ -238,44 +243,31 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
         
         t2 = time.time()
 
-        # Extract results for each frame in the batch
         for i in range(len(batch_data)):
             image_path = batch_data[i]["path"]
-            image_tensor_single = batch_data[i]["tensor"]
-            
             res_to_save = {
                 "extrinsic": extrinsic_np[i],
                 "intrinsic": intrinsic_np[i],
                 "depth": depth_np[i],
                 "depth_conf": depth_conf_np[i],
                 "world_points_from_depth": wp_depth_np[i],
-                "images": image_tensor_single.cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
+                "images": batch_data[i]["tensor"].cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
             }
-            
             if wp_local_np is not None:
                 res_to_save["world_points"] = wp_local_np[i]
                 res_to_save["world_points_conf"] = lp_conf_np[i]
                 res_to_save["local_points"] = lp_np[i]
 
-            # Save individual frame
             save_path = os.path.join(target_dir, "predictions", f"{os.path.basename(image_path)}.npz")
             save_queue.put({"predictions": res_to_save, "save_path": save_path})
             
-            # Accumulate for return (compatibility with existing visualization)
             for k, v in res_to_save.items():
                 all_predictions[k].append(v)
-            
             image_queue.task_done()
-        t3 = time.time()
         
         # Update progress
         if progress is not None:
-            # For progress.tqdm we don't manually update, but the loop is over image_names
-            # Wait, our loop is while processed_count < len(image_names)
-            # Let's adjust this to use the iterable properly or manually update
-            pass
-        else:
-            pbar.update(len(batch_data))
+            progress(processed_count / len(image_names), desc=f"Processed {processed_count}/{len(image_names)} frames")
             
         print(f"DEBUG: Processed batch of {len(batch_data)} frames. Total: {processed_count}/{len(image_names)}")
         # print(f"Batch inference: {t1-t0:.3f}s, GPU Post-proc & Sync: {t2-t1:.3f}s, Finalizing: {t3-t2:.3f}s")
