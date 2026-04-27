@@ -52,9 +52,17 @@ class ResultSaverWorker(BaseWorker):
         predictions = data["predictions"]
         save_path = data["save_path"]
         
-        # 确保保存目录存在
+        # Ensure directory exists
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
-        # 使用 np.savez_compressed 以节省磁盘空间
-        np.savez_compressed(save_path, **predictions)
+        # Convert tensors to numpy if they aren't already
+        import torch
+        np_predictions = {}
+        for k, v in predictions.items():
+            if isinstance(v, torch.Tensor):
+                np_predictions[k] = v.detach().cpu().numpy()
+            else:
+                np_predictions[k] = v
+                
+        np.savez_compressed(save_path, **np_predictions)
         return None
