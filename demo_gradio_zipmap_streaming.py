@@ -129,8 +129,8 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
 
     # Setup queues
     path_queue = queue.Queue()
-    for p in image_names:
-        path_queue.put(p)
+    for i, p in enumerate(image_names):
+        path_queue.put((i, p))
     for _ in range(num_load_threads):
         path_queue.put(None)  # poison pills for loaders
 
@@ -154,31 +154,39 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
 
     # Inference loop
     processed_count = 0
+    next_idx = 0
+    buffer = {}
     
     # Use Gradio progress if available
     if progress is not None:
         progress(0, desc="Starting streaming inference...")
 
     while processed_count < len(image_names):
-        # 1) Collect batch
+        # 1) Collect batch in CORRECT order
         batch_data = []
-        for _ in range(batch_size):
-            if processed_count >= len(image_names):
-                break
-            # Use timeout to avoid eternal blocking if loaders fail
+        
+        while len(batch_data) < batch_size and next_idx < len(image_names):
+            # First check buffer
+            if next_idx in buffer:
+                batch_data.append(buffer.pop(next_idx))
+                next_idx += 1
+                continue
+            
+            # If not in buffer, get from queue
             try:
-                data = image_queue.get(timeout=10)
-                batch_data.append(data)
-                processed_count += 1
+                data = image_queue.get(timeout=1.0)
+                buffer[data["index"]] = data
+                # After getting new data, try to pull from buffer again in next iteration
             except queue.Empty:
-                print(f"DEBUG: Main loop waiting for images... (Current: {processed_count}/{len(image_names)})")
-                break
+                if next_idx >= len(image_names): break
+                print(f"DEBUG: Main loop waiting for image index {next_idx}... (Loaded so far: {len(buffer)})")
+                continue
         
         if not batch_data:
-            if processed_count >= len(image_names): break
-            continue
+            break
         
-        print(f"DEBUG: Batch collected ({len(batch_data)} frames). Moving to GPU...")
+        processed_count += len(batch_data)
+        print(f"DEBUG: Batch collected ({len(batch_data)} frames, indices {batch_data[0]['index']}-{batch_data[-1]['index']}). Moving to GPU...")
         # 2) Data transfer
         batch_tensors = [d["tensor"] for d in batch_data]
         images = torch.cat([t.unsqueeze(1) for t in batch_tensors], dim=1).to(device)
@@ -723,7 +731,7 @@ with gr.Blocks(
                 label="Loading Threads",
                 minimum=1,
                 maximum=16,
-                value=8,
+                value=4,
                 step=1
             )
             img_queue_size = gr.Slider(

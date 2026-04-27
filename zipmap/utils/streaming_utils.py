@@ -45,14 +45,22 @@ class ImageLoaderWorker(BaseWorker):
         super().__init__(in_queue, out_queue, name)
         self.count = 0
 
-    def process(self, image_path):
+    def process(self, item):
+        # item is now expected to be (index, image_path)
+        if isinstance(item, (list, tuple)):
+            idx, image_path = item
+        else:
+            # Fallback for backward compatibility if needed, though we should update callers
+            idx = -1
+            image_path = item
+
         # 预处理图片
         # 注意: load_and_preprocess_images 接受一个列表，返回 (N, 3, H, W) 的 tensor
         tensor = load_and_preprocess_images([image_path])
         self.count += 1
         if self.count % 50 == 0:
             print(f"DEBUG: Loader {self.name or ''} loaded {self.count} images")
-        return {"path": image_path, "tensor": tensor}
+        return {"index": idx, "path": image_path, "tensor": tensor}
 
 class ResultSaverWorker(BaseWorker):
     def process(self, data):
