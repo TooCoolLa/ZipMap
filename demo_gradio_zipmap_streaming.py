@@ -237,15 +237,23 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
 
         # 5) Move to CPU & Save
         print(f"DEBUG: Copying results to CPU and queuing for save...")
-        extrinsic_np = extrinsic.cpu().float().numpy().squeeze(0)
-        intrinsic_np = intrinsic.cpu().float().numpy().squeeze(0)
-        depth_np = predictions["depth"].cpu().float().numpy().squeeze(0)
-        depth_conf_np = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if predictions.get("depth_conf") is not None else [None] * len(batch_data)
-        wp_depth_np = world_points_from_depth.cpu().float().numpy().squeeze(0)
         
-        wp_local_np = world_points.cpu().float().numpy().squeeze(0) if world_points is not None else None
-        lp_conf_np = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if predictions.get("local_points_conf") is not None else [None] * len(batch_data)
-        lp_np = predictions["local_points"].cpu().float().numpy().squeeze(0) if predictions.get("local_points") is not None else None
+        def to_numpy_and_remove_batch(tensor):
+            if tensor is None: return None
+            res = tensor.cpu().float().numpy()
+            if res.shape[0] == 1:
+                return res[0]
+            return res
+
+        extrinsic_np = to_numpy_and_remove_batch(extrinsic)
+        intrinsic_np = to_numpy_and_remove_batch(intrinsic)
+        depth_np = to_numpy_and_remove_batch(predictions["depth"])
+        depth_conf_np = to_numpy_and_remove_batch(predictions["depth_conf"]) if predictions.get("depth_conf") is not None else [None] * len(batch_data)
+        wp_depth_np = to_numpy_and_remove_batch(world_points_from_depth)
+        
+        wp_local_np = to_numpy_and_remove_batch(world_points) if world_points is not None else None
+        lp_conf_np = to_numpy_and_remove_batch(predictions["local_points_conf"]) if predictions.get("local_points_conf") is not None else [None] * len(batch_data)
+        lp_np = to_numpy_and_remove_batch(predictions["local_points"]) if predictions.get("local_points") is not None else None
         
         t2 = time.time()
 
