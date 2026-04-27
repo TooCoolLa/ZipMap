@@ -28,7 +28,7 @@ dependencies = [
     "fvcore",
 ]
 name = "zipmap"
-requires-python = ">= 3.11"
+requires-python = ">= 3.10"
 version = "0.0.1"
 
 # Using setuptools as the build backend
