@@ -56,9 +56,13 @@ def main():
     print(f"Visualizing {len(npz_paths)} frames (stride={args.stride})")
 
     server = viser.ViserServer()
-    # In OpenCV coordinates (+X: right, +Y: down, +Z: forward), 
-    # the "up" direction is actually -Y.
-    server.scene.set_up_direction("y", drag_up_direction_axes=False) 
+    # ZipMap uses OpenCV coords (+X: right, +Y: down, +Z: forward).
+    # To make the scene appear upright, we set the up direction to -Y.
+    try:
+        server.scene.set_up_direction("-y")
+    except Exception:
+        # Fallback for very old viser versions
+        server.scene.set_up_direction("y")
 
     # GUI Elements
     conf_slider = server.gui.add_slider("Conf Threshold", min=0.0, max=1.0, step=0.01, initial_value=0.5)
