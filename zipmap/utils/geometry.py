@@ -8,37 +8,67 @@ from zipmap.dependency.distortion import apply_distortion, iterative_undistortio
 
 
 def unproject_depth_map_to_point_map(
-    depth_map: np.ndarray, extrinsics_cam: np.ndarray, intrinsics_cam: np.ndarray, if_c2w=False
-
-) -> np.ndarray:
+    depth_map: torch.Tensor | np.ndarray, 
+    extrinsics_cam: torch.Tensor | np.ndarray, 
+    intrinsics_cam: torch.Tensor | np.ndarray, 
+    if_c2w=False
+) -> torch.Tensor | np.ndarray:
     """
     Unproject a batch of depth maps to 3D world coordinates.
-
-    Args:
-        depth_map (np.ndarray): Batch of depth maps of shape (S, H, W, 1) or (S, H, W)
-        extrinsics_cam (np.ndarray): Batch of camera extrinsic matrices of shape (S, 3, 4)
-        intrinsics_cam (np.ndarray): Batch of camera intrinsic matrices of shape (S, 3, 3)
-        if_c2w (bool, optional): If True, extrinsics are camera-to-world. If False, world-to-camera. Defaults to False.
-
-    Returns:
-        np.ndarray: Batch of 3D world coordinates of shape (S, H, W, 3)
+    Supports both PyTorch tensors (on GPU/CPU) and NumPy arrays.
     """
-    if isinstance(depth_map, torch.Tensor):
-        depth_map = depth_map.cpu().float().numpy()
-    if isinstance(extrinsics_cam, torch.Tensor):
-        extrinsics_cam = extrinsics_cam.cpu().float().numpy()
-    if isinstance(intrinsics_cam, torch.Tensor):
-        intrinsics_cam = intrinsics_cam.cpu().numpy()
+    if isinstance(depth_map, np.ndarray):
+        world_points_list = []
+        for frame_idx in range(depth_map.shape[0]):
+            cur_world_points, _, _ = depth_to_world_coords_points(
+                depth_map[frame_idx], extrinsics_cam[frame_idx], intrinsics_cam[frame_idx], if_c2w=if_c2w
+            )
+            world_points_list.append(cur_world_points)
+        return np.stack(world_points_list, axis=0)
 
-    world_points_list = []
-    for frame_idx in range(depth_map.shape[0]):
-        cur_world_points, _, _ = depth_to_world_coords_points(
-            depth_map[frame_idx], extrinsics_cam[frame_idx], intrinsics_cam[frame_idx], if_c2w=if_c2w
-        )
-        world_points_list.append(cur_world_points)
-    world_points_array = np.stack(world_points_list, axis=0)
-
-    return world_points_array
+    # PyTorch implementation
+    device = depth_map.device
+    if depth_map.ndim == 3: # (S, H, W) -> (1, S, H, W)
+        depth_map = depth_map.unsqueeze(0)
+    if extrinsics_cam.ndim == 3:
+        extrinsics_cam = extrinsics_cam.unsqueeze(0)
+    if intrinsics_cam.ndim == 3:
+        intrinsics_cam = intrinsics_cam.unsqueeze(0)
+    
+    B, S, H, W = depth_map.shape
+    
+    # 1. Create grid
+    v, u = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+    u = u.reshape(1, 1, H, W).expand(B, S, H, W).to(depth_map.dtype)
+    v = v.reshape(1, 1, H, W).expand(B, S, H, W).to(depth_map.dtype)
+    
+    # 2. To camera coordinates
+    fu = intrinsics_cam[:, :, 0, 0].view(B, S, 1, 1)
+    fv = intrinsics_cam[:, :, 1, 1].view(B, S, 1, 1)
+    cu = intrinsics_cam[:, :, 0, 2].view(B, S, 1, 1)
+    cv = intrinsics_cam[:, :, 1, 2].view(B, S, 1, 1)
+    
+    x_cam = (u - cu) * depth_map / fu
+    y_cam = (v - cv) * depth_map / fv
+    z_cam = depth_map
+    
+    cam_points = torch.stack([x_cam, y_cam, z_cam], dim=-1) # (B, S, H, W, 3)
+    
+    # 3. To world coordinates
+    if not if_c2w:
+        # Convert world-to-cam to cam-to-world
+        cam_to_world = closed_form_inverse_se3(extrinsics_cam.view(-1, 3, 4))
+        R_inv = cam_to_world[:, :3, :3].view(B, S, 3, 3)
+        T_inv = cam_to_world[:, :3, 3:].view(B, S, 3, 1)
+    else:
+        R_inv = extrinsics_cam[:, :, :3, :3]
+        T_inv = extrinsics_cam[:, :, :3, 3:]
+        
+    cam_points_flat = cam_points.view(B, S, -1, 3).transpose(-1, -2) # (B, S, 3, HW)
+    world_points_flat = torch.matmul(R_inv, cam_points_flat) + T_inv # (B, S, 3, HW)
+    world_points = world_points_flat.transpose(-1, -2).view(B, S, H, W, 3)
+    
+    return world_points.squeeze(0)
 
 
 def depth_to_world_coords_points(

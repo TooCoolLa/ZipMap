@@ -43,6 +43,7 @@ import time
 import argparse 
 import queue
 import collections
+from tqdm import tqdm
 sys.path.append("zipmap/")
 
 PAGE_SIZE = 30
@@ -153,6 +154,7 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
 
     # Inference loop
     processed_count = 0
+    pbar = tqdm(total=len(image_names), desc="Processing")
     while processed_count < len(image_names):
         batch_data = []
         # Collect up to batch_size frames
@@ -173,71 +175,81 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
         images = torch.cat([t.unsqueeze(1) for t in batch_tensors], dim=1).to(device)
         
         # Run inference
+        t0 = time.time()
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=dtype):
                 predictions = model(images, store_state=True, window_size=window_size, state_list=current_state_list)
                 current_state_list = predictions["state_list"]
+        t1 = time.time()
         
-        # Post-processing: Pose (supports BxSx... format)
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+        # Post-processing on GPU (Batched)
+        with torch.no_grad():
+            extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+            
+            # Align first view on GPU if needed
+            if args.align_first_view:
+                B, S = extrinsic.shape[:2]
+                extrinsic_homog = torch.eye(4, device=device).view(1, 1, 4, 4).repeat(B, S, 1, 1).to(extrinsic.dtype)
+                extrinsic_homog[:, :, :3, :] = extrinsic
+                
+                if first_cam_inv is None:
+                    first_cam_inv = closed_form_inverse_se3(extrinsic_homog[:, 0]) # (B, 4, 4)
+                
+                # Apply first_cam_inv to all
+                # (B, S, 4, 4) @ (B, 1, 4, 4) -> (B, S, 4, 4)
+                new_extrinsic_homog = torch.matmul(extrinsic_homog, first_cam_inv.unsqueeze(1))
+                extrinsic = new_extrinsic_homog[:, :, :3, :]
+
+            # World points from depth on GPU
+            world_points_from_depth = unproject_depth_map_to_point_map(
+                predictions["depth"], extrinsic, intrinsic
+            ) # (B, S, H, W, 3)
+
+            # Local points to world points on GPU
+            world_points = None
+            if "local_points" in predictions:
+                lp = predictions["local_points"]
+                B, S, H, W, _ = lp.shape
+                extrinsic_homog = torch.eye(4, device=device).view(1, 1, 4, 4).repeat(B, S, 1, 1).to(lp.dtype)
+                extrinsic_homog[:, :, :3, :] = extrinsic
+                cam_to_world = closed_form_inverse_se3(extrinsic_homog.view(-1, 4, 4))
+                
+                lp_h = torch.cat([lp, torch.ones_like(lp[..., :1])], dim=-1) # (B, S, H, W, 4)
+                lp_h_flat = lp_h.view(-1, H*W, 4).transpose(-1, -2) # (BS, 4, HW)
+                wp_h_flat = torch.matmul(cam_to_world, lp_h_flat) # (BS, 4, HW)
+                world_points = wp_h_flat.transpose(-1, -2).view(B, S, H, W, 4)[..., :3]
+
+        # Final move to CPU and numpy
+        extrinsic_np = extrinsic.cpu().float().numpy().squeeze(0)
+        intrinsic_np = intrinsic.cpu().float().numpy().squeeze(0)
+        depth_np = predictions["depth"].cpu().float().numpy().squeeze(0)
+        depth_conf_np = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if predictions.get("depth_conf") is not None else [None] * len(batch_data)
+        wp_depth_np = world_points_from_depth.cpu().float().numpy().squeeze(0)
         
-        # Convert tensors to numpy and remove batch dim (result: [S, ...])
-        extrinsic_all = extrinsic.cpu().float().numpy().squeeze(0) if extrinsic is not None else None
-        intrinsic_all = intrinsic.cpu().float().numpy().squeeze(0) if intrinsic is not None else None
-        depth_all = predictions["depth"].cpu().float().numpy().squeeze(0) if predictions.get("depth") is not None else None
-        depth_conf_all = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if predictions.get("depth_conf") is not None else [None] * len(batch_data)
+        wp_local_np = world_points.cpu().float().numpy().squeeze(0) if world_points is not None else None
+        lp_conf_np = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if predictions.get("local_points_conf") is not None else [None] * len(batch_data)
+        lp_np = predictions["local_points"].cpu().float().numpy().squeeze(0) if predictions.get("local_points") is not None else None
         
-        local_points_all = None
-        local_points_conf_all = None
-        if "local_points" in predictions:
-            local_points_all = predictions["local_points"].cpu().float().numpy().squeeze(0) if predictions.get("local_points") is not None else None
-            local_points_conf_all = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if predictions.get("local_points_conf") is not None else [None] * len(batch_data)
+        t2 = time.time()
 
         # Extract results for each frame in the batch
         for i in range(len(batch_data)):
             image_path = batch_data[i]["path"]
             image_tensor_single = batch_data[i]["tensor"]
             
-            curr_extrinsic = extrinsic_all[i]
-            curr_intrinsic = intrinsic_all[i]
-            curr_depth = depth_all[i]
-            curr_depth_conf = depth_conf_all[i]
-
-            if args.align_first_view:
-                extrinsic_homog = np.eye(4)
-                extrinsic_homog[:3, :] = curr_extrinsic
-                if first_cam_inv is None:
-                    first_cam_inv = closed_form_inverse_se3(extrinsic_homog[None])[0]
-                
-                new_extrinsic_homog = extrinsic_homog @ first_cam_inv
-                curr_extrinsic = new_extrinsic_homog[:3, :]
-
-            # World points from depth
-            world_points_from_depth = unproject_depth_map_to_point_map(
-                curr_depth[None], curr_extrinsic[None], curr_intrinsic[None]
-            ).squeeze(0)
-            
             res_to_save = {
-                "extrinsic": curr_extrinsic,
-                "intrinsic": curr_intrinsic,
-                "depth": curr_depth,
-                "depth_conf": curr_depth_conf,
-                "world_points_from_depth": world_points_from_depth,
+                "extrinsic": extrinsic_np[i],
+                "intrinsic": intrinsic_np[i],
+                "depth": depth_np[i],
+                "depth_conf": depth_conf_np[i],
+                "world_points_from_depth": wp_depth_np[i],
                 "images": image_tensor_single.cpu().float().numpy().squeeze(0).transpose(1, 2, 0)
             }
             
-            if local_points_all is not None:
-                curr_local_points = local_points_all[i]
-                curr_local_points_conf = local_points_conf_all[i]
-                
-                extrinsic_homog = np.eye(4)
-                extrinsic_homog[:3, :] = curr_extrinsic
-                cam_to_world = closed_form_inverse_se3(extrinsic_homog[None])[0]
-                
-                world_points = np.einsum('ij, hwj -> hwi', cam_to_world, homogenize_points(curr_local_points))
-                res_to_save["world_points"] = world_points[..., :3]
-                res_to_save["world_points_conf"] = curr_local_points_conf
-                res_to_save["local_points"] = curr_local_points
+            if wp_local_np is not None:
+                res_to_save["world_points"] = wp_local_np[i]
+                res_to_save["world_points_conf"] = lp_conf_np[i]
+                res_to_save["local_points"] = lp_np[i]
 
             # Save individual frame
             save_path = os.path.join(target_dir, "predictions", f"{os.path.basename(image_path)}.npz")
@@ -248,6 +260,11 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
                 all_predictions[k].append(v)
             
             image_queue.task_done()
+        t3 = time.time()
+        pbar.update(len(batch_data))
+        # print(f"Batch inference: {t1-t0:.3f}s, GPU Post-proc & Sync: {t2-t1:.3f}s, Finalizing: {t3-t2:.3f}s")
+        
+    pbar.close()
         
     # Cleanup
     for _ in range(num_save_threads):
@@ -383,6 +400,7 @@ def gradio_demo(
     save_queue_size=80,
     batch_size=1,
     window_size=1,
+    progress=gr.Progress(track_tqdm=True)
 ):
     """
     Perform reconstruction using the already-created target_dir/images.
@@ -679,29 +697,29 @@ with gr.Blocks(
             loading_threads = gr.Slider(
                 label="Loading Threads",
                 minimum=1,
-                maximum=8,
-                value=2,
+                maximum=16,
+                value=8,
                 step=1
             )
             img_queue_size = gr.Slider(
                 label="Image Queue Size",
                 minimum=10,
-                maximum=500,
-                value=200,
+                maximum=1000,
+                value=512,
                 step=10
             )
             save_threads = gr.Slider(
                 label="Saving Threads",
                 minimum=1,
                 maximum=os.cpu_count() or 8,
-                value=max(1, (os.cpu_count() or 4) - 2),
+                value=max(1, (os.cpu_count() or 4) // 2),
                 step=1
             )
             save_queue_size = gr.Slider(
                 label="Saving Queue Size",
                 minimum=10,
-                maximum=200,
-                value=80,
+                maximum=500,
+                value=256,
                 step=10
             )
 
@@ -709,8 +727,8 @@ with gr.Blocks(
                 batch_size = gr.Slider(
                     label="Inference Batch Size",
                     minimum=1,
-                    maximum=16,
-                    value=1,
+                    maximum=64,
+                    value=16,
                     step=1
                 )
                 window_size = gr.Slider(
