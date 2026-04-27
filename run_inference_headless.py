@@ -41,9 +41,12 @@ def run_inference(
         "ttt_config": {
             "ttt_mode": True,
             "params": {
-                "hidden_size": 1024,
-                "num_heads": 1,
-                "num_layers": 1,
+                "bias": True,
+                "head_dim": 1024,
+                "inter_multi": 2,
+                "base_lr": 0.01,
+                "muon_update_steps": 5,
+                "use_gate_fn": True
             }
         }
     }
