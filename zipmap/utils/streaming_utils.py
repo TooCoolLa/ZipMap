@@ -13,11 +13,18 @@ class BaseWorker(threading.Thread, abc.ABC):
         while not self.stop_event.is_set() or not self.in_queue.empty():
             try:
                 item = self.in_queue.get(timeout=0.1)
-                if item is None: break
-                result = self.process(item)
-                if self.out_queue and result is not None:
-                    self.out_queue.put(result)
-                self.in_queue.task_done()
+                if item is None:
+                    self.in_queue.task_done()
+                    break
+                
+                try:
+                    result = self.process(item)
+                    if self.out_queue and result is not None:
+                        self.out_queue.put(result)
+                except Exception as e:
+                    print(f"Error in {self.name}: {e}")
+                finally:
+                    self.in_queue.task_done()
             except queue.Empty:
                 continue
 

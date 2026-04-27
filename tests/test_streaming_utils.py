@@ -16,3 +16,17 @@ def test_worker_lifecycle():
     time.sleep(0.1)
     worker.stop()
     assert 1 in results
+
+def test_poison_pill_hang():
+    q = queue.Queue()
+    class MockWorker(BaseWorker):
+        def process(self, item):
+            pass
+    
+    worker = MockWorker(q)
+    worker.start()
+    q.put(None)
+    # This might hang if task_done is not called for None
+    q.join() 
+    worker.join()
+    assert True
