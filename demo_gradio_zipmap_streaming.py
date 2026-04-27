@@ -197,6 +197,12 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
         with torch.no_grad():
             extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
             
+            # Squeeze channel dimension if it exists [B, S, H, W, 1] -> [B, S, H, W]
+            if predictions["depth"].ndim == 5 and predictions["depth"].shape[-1] == 1:
+                predictions["depth"] = predictions["depth"].squeeze(-1)
+            if predictions.get("depth_conf") is not None and predictions["depth_conf"].ndim == 5 and predictions["depth_conf"].shape[-1] == 1:
+                predictions["depth_conf"] = predictions["depth_conf"].squeeze(-1)
+
             # Align first view on GPU if needed
             if args.align_first_view:
                 B, S = extrinsic.shape[:2]
