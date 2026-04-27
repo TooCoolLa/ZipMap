@@ -45,6 +45,26 @@ import queue
 import collections
 sys.path.append("zipmap/")
 
+PAGE_SIZE = 30
+
+def get_gallery_slice(all_paths, page):
+    if not all_paths or len(all_paths) == 0:
+        return None, "Page 0 of 0", 1
+    
+    total_pages = (len(all_paths) + PAGE_SIZE - 1) // PAGE_SIZE
+    try:
+        page = int(page)
+    except (ValueError, TypeError):
+        page = 1
+        
+    page = max(1, min(page, total_pages))
+    
+    start = (page - 1) * PAGE_SIZE
+    end = start + PAGE_SIZE
+    
+    slice_paths = all_paths[start:end]
+    return slice_paths, f"Page {page} of {total_pages}", page
+
 from visual_util import predictions_to_glb
 from zipmap.models.ZipMap_AR import ZipMap
 from zipmap.utils.load_fn import load_and_preprocess_images
@@ -148,9 +168,9 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
         if not batch_data:
             break
         
-        # Concatenate [1, 1, 3, H, W] into [1, S, 3, H, W]
+        # Construct [1, S, 3, H, W] from list of [1, 3, H, W]
         batch_tensors = [d["tensor"] for d in batch_data]
-        images = torch.cat(batch_tensors, dim=1).to(device)
+        images = torch.cat([t.unsqueeze(1) for t in batch_tensors], dim=1).to(device)
         
         # Run inference
         with torch.no_grad():
@@ -449,17 +469,13 @@ def update_log():
 
 
 def update_visualization(
-    target_dir, conf_thres, frame_filter, mask_black_bg, mask_white_bg, show_cam, mask_sky, prediction_mode, is_example,
+    target_dir, conf_thres, frame_filter, mask_black_bg, mask_white_bg, show_cam, mask_sky, prediction_mode,
     cam_size_factor=1.0,
 ):
     """
     Reload saved predictions from npz, create (or reuse) the GLB for new parameters,
-    and return it for the 3D viewer. If is_example == "True", skip.
+    and return it for the 3D viewer.
     """
-
-    # If it's an example click, skip as requested
-    if is_example == "True":
-        return None, "No reconstruction available. Please click the Reconstruct button first."
 
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         return None, "No reconstruction available. Please click the Reconstruct button first."
@@ -522,23 +538,6 @@ def update_visualization(
 
 
 # -------------------------------------------------------------------------
-# Example images
-# -------------------------------------------------------------------------
-
-
-dl3dv_video = "examples/videos/dl3dv.mp4"
-room_video = "examples/videos/room.mp4"
-kitchen_video = "examples/videos/kitchen.mp4"
-single_cartoon_video = "examples/videos/single_cartoon.mp4"
-pyramid_video = "examples/videos/pyramid.mp4"
-drift_straight_video = "examples/videos/drift-straight.mp4"
-sora_big_sur_video = "examples/videos/sora_big-sur.mp4"
-Istanbul_video = "examples/videos/Istanbul.mp4"
-figureskating_video = "examples/videos/figureskating.mp4"
-walkthrough_video = "examples/videos/walkthrough.mp4"
-
-
-# -------------------------------------------------------------------------
 # 6) Build Gradio UI
 # -------------------------------------------------------------------------
 
@@ -554,6 +553,8 @@ if args.image_dir and os.path.isdir(args.image_dir):
         print(f"Pre-loading {len(image_files)} images from {args.image_dir}")
         initial_target_dir, initial_image_paths = handle_uploads(None, image_files)
         initial_log_msg = f"Pre-loaded {len(image_files)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+
+initial_gallery_value, initial_page_info, initial_page_num = get_gallery_slice(initial_image_paths, 1)
 
 theme = gr.themes.Ocean()
 theme.set(
@@ -603,8 +604,8 @@ with gr.Blocks(
     """,
 ) as demo:
     # Instead of gr.State, we use a hidden Textbox:
-    is_example = gr.Textbox(label="is_example", visible=False, value="None")
     num_images = gr.Textbox(label="num_images", visible=False, value="None")
+    all_image_paths = gr.State(initial_image_paths)
 
     gr.HTML(
     """
@@ -708,9 +709,16 @@ with gr.Blocks(
                 show_download_button=True,
                 object_fit="contain",
                 preview=True,
-                value=initial_image_paths
+                value=initial_gallery_value
             )
 
+            with gr.Row():
+                prev_page_btn = gr.Button("Previous Page", size="sm")
+                page_num = gr.Number(value=initial_page_num, label="Page", precision=0, minimum=1, step=1, scale=1)
+                next_page_btn = gr.Button("Next Page", size="sm")
+            
+            page_info = gr.Markdown(initial_page_info)
+        
         with gr.Column(scale=4):
             with gr.Column():
                 gr.Markdown("**3D Reconstruction (Point Cloud and Camera Poses)**")
@@ -722,7 +730,7 @@ with gr.Blocks(
             with gr.Row():
                 submit_btn = gr.Button("Reconstruct", scale=1, variant="primary")
                 clear_btn = gr.ClearButton(
-                    [input_video, input_images, reconstruction_output, log_output, target_dir_output, image_gallery],
+                    [input_video, input_images, reconstruction_output, log_output, target_dir_output, image_gallery, all_image_paths, page_num],
                     scale=1,
                 )
 
@@ -745,74 +753,23 @@ with gr.Blocks(
                     mask_black_bg = gr.Checkbox(label="Filter Black Background", value=False)
                     mask_white_bg = gr.Checkbox(label="Filter White Background", value=False)
 
-    # ---------------------- Examples section ----------------------
-    examples = [
-        [Istanbul_video, "44", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-        # [sora_big_sur_video, "19", None, 3.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-        [pyramid_video, "30", None, 1.0, 35.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-        [room_video, "8", None, 1.0, 5.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-        [dl3dv_video, "29", None, 2.0, 30.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5, 1, 1],
-        [kitchen_video, "29", None, 2.0, 40.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-        [figureskating_video, "14", None, 3.0, 20.0, False, False, True, False, "Depthmap and Camera Branch", "True", 0.5, 1, 1],
-        [single_cartoon_video, "1", None, 1.0, 15.0, False, False, True, False, "Depthmap and Camera Branch", "True", 1.0, 1, 1],
-
-    ]
-
-    def example_pipeline(
-        input_video,
-        num_images_str,
-        input_images,
-        target_fps,
-        conf_thres,
-        mask_black_bg,
-        mask_white_bg,
-        show_cam,
-        mask_sky,
-        prediction_mode,
-        is_example_str,
-        cam_size_factor=1.0,
-        batch_size=1,
-        window_size=1,
-    ):
-        """
-        1) Copy example images to new target_dir
-        2) Reconstruct
-        3) Return model3D + logs + new_dir + updated dropdown + gallery
-        We do NOT return is_example. It's just an input.
-        """
-        target_dir, image_paths = handle_uploads(input_video, input_images, target_fps)
-        # Always use "All" for frame_filter in examples
-        frame_filter = "All"
-        glbfile, log_msg, dropdown = gradio_demo(
-            target_dir, conf_thres, frame_filter, mask_black_bg, mask_white_bg, show_cam, mask_sky, prediction_mode, cam_size_factor,
-            batch_size=batch_size, window_size=window_size
-        )
-        return glbfile, log_msg, target_dir, dropdown, image_paths
-
-    gr.Markdown("Click any row to load an example.", elem_classes=["example-log"])
-
-    gr.Examples(
-        examples=examples,
-        inputs=[
-            input_video,
-            num_images,
-            input_images,
-            target_fps,
-            conf_thres,
-            mask_black_bg,
-            mask_white_bg,
-            show_cam,
-            mask_sky,
-            prediction_mode,
-            is_example,
-            cam_size_factor,
-            batch_size,
-            window_size,
-        ],
-        outputs=[reconstruction_output, log_output, target_dir_output, frame_filter, image_gallery],
-        fn=example_pipeline,
-        cache_examples=False,
-        examples_per_page=50,
+    # -------------------------------------------------------------------------
+    # Pagination Events
+    # -------------------------------------------------------------------------
+    prev_page_btn.click(
+        fn=lambda paths, p: get_gallery_slice(paths, p - 1),
+        inputs=[all_image_paths, page_num],
+        outputs=[image_gallery, page_info, page_num]
+    )
+    next_page_btn.click(
+        fn=lambda paths, p: get_gallery_slice(paths, p + 1),
+        inputs=[all_image_paths, page_num],
+        outputs=[image_gallery, page_info, page_num]
+    )
+    page_num.submit(
+        fn=get_gallery_slice,
+        inputs=[all_image_paths, page_num],
+        outputs=[image_gallery, page_info, page_num]
     )
 
     # -------------------------------------------------------------------------
@@ -820,7 +777,6 @@ with gr.Blocks(
     #  - Clear fields
     #  - Update log
     #  - gradio_demo(...) with the existing target_dir
-    #  - Then set is_example = "False"
     # -------------------------------------------------------------------------
     submit_btn.click(fn=clear_fields, inputs=[], outputs=[reconstruction_output]).then(
         fn=update_log, inputs=[], outputs=[log_output]
@@ -844,8 +800,6 @@ with gr.Blocks(
             window_size,
         ],
         outputs=[reconstruction_output, log_output, frame_filter],
-    ).then(
-        fn=lambda: "False", inputs=[], outputs=[is_example]  # set is_example to "False"
     )
 
     # -------------------------------------------------------------------------
@@ -860,7 +814,6 @@ with gr.Blocks(
         show_cam,
         mask_sky,
         prediction_mode,
-        is_example,
         cam_size_factor,
     ]
     viz_outputs = [reconstruction_output, log_output]
@@ -877,20 +830,27 @@ with gr.Blocks(
     # -------------------------------------------------------------------------
     # Auto-update gallery whenever user uploads or changes their files
     # -------------------------------------------------------------------------
+    def wrap_update_gallery(input_video, input_images, target_fps):
+        _, target_dir, all_paths, log_msg = update_gallery_on_upload(input_video, input_images, target_fps)
+        gallery_slice, info, p_num = get_gallery_slice(all_paths, 1)
+        return None, target_dir, all_paths, gallery_slice, info, p_num, log_msg
+
+    upload_outputs = [reconstruction_output, target_dir_output, all_image_paths, image_gallery, page_info, page_num, log_output]
+
     input_video.change(
-        fn=update_gallery_on_upload,
+        fn=wrap_update_gallery,
         inputs=[input_video, input_images, target_fps],
-        outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
+        outputs=upload_outputs,
     )
     input_images.change(
-        fn=update_gallery_on_upload,
+        fn=wrap_update_gallery,
         inputs=[input_video, input_images, target_fps],
-        outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
+        outputs=upload_outputs,
     )
     target_fps.change(
-        fn=update_gallery_on_upload,
+        fn=wrap_update_gallery,
         inputs=[input_video, input_images, target_fps],
-        outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
+        outputs=upload_outputs,
     )
 
     demo.queue(max_size=20).launch(show_error=True, share=True)
