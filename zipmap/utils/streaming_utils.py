@@ -41,10 +41,17 @@ class BaseWorker(threading.Thread, abc.ABC):
         self.join()
 
 class ImageLoaderWorker(BaseWorker):
+    def __init__(self, in_queue, out_queue=None, name=None):
+        super().__init__(in_queue, out_queue, name)
+        self.count = 0
+
     def process(self, image_path):
         # 预处理图片
         # 注意: load_and_preprocess_images 接受一个列表，返回 (N, 3, H, W) 的 tensor
         tensor = load_and_preprocess_images([image_path])
+        self.count += 1
+        if self.count % 50 == 0:
+            print(f"DEBUG: Loader {self.name or ''} loaded {self.count} images")
         return {"path": image_path, "tensor": tensor}
 
 class ResultSaverWorker(BaseWorker):

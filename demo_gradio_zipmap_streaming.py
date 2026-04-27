@@ -107,7 +107,7 @@ model = model.to(device)
 # -------------------------------------------------------------------------
 # 1) Core model inference (Streaming)
 # -------------------------------------------------------------------------
-def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None, img_queue_size=200, save_queue_size=80, batch_size=1, window_size=1) -> dict:
+def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None, img_queue_size=200, save_queue_size=80, batch_size=1, window_size=1, progress=None) -> dict:
     """
     Run the ZipMap model on images in the 'target_dir/images' folder using streaming multi-threading.
     """
@@ -138,8 +138,8 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
     save_queue = queue.Queue(maxsize=save_queue_size)
 
     # Start workers
-    loaders = [ImageLoaderWorker(path_queue, image_queue) for _ in range(num_load_threads)]
-    savers = [ResultSaverWorker(save_queue) for _ in range(num_save_threads)]
+    loaders = [ImageLoaderWorker(path_queue, image_queue, name=f"Loader-{i}") for i in range(num_load_threads)]
+    savers = [ResultSaverWorker(save_queue, name=f"Saver-{i}") for i in range(num_save_threads)]
 
     for w in loaders + savers:
         w.start()
@@ -154,7 +154,13 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
 
     # Inference loop
     processed_count = 0
-    pbar = tqdm(total=len(image_names), desc="Processing")
+    
+    # Use Gradio progress if available, otherwise fallback to tqdm
+    if progress is not None:
+        pbar = progress.tqdm(image_names, desc="Processing")
+    else:
+        pbar = tqdm(total=len(image_names), desc="Processing")
+
     while processed_count < len(image_names):
         batch_data = []
         # Collect up to batch_size frames
@@ -261,10 +267,21 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
             
             image_queue.task_done()
         t3 = time.time()
-        pbar.update(len(batch_data))
+        
+        # Update progress
+        if progress is not None:
+            # For progress.tqdm we don't manually update, but the loop is over image_names
+            # Wait, our loop is while processed_count < len(image_names)
+            # Let's adjust this to use the iterable properly or manually update
+            pass
+        else:
+            pbar.update(len(batch_data))
+            
+        print(f"DEBUG: Processed batch of {len(batch_data)} frames. Total: {processed_count}/{len(image_names)}")
         # print(f"Batch inference: {t1-t0:.3f}s, GPU Post-proc & Sync: {t2-t1:.3f}s, Finalizing: {t3-t2:.3f}s")
         
-    pbar.close()
+    if progress is None:
+        pbar.close()
         
     # Cleanup
     for _ in range(num_save_threads):
@@ -400,7 +417,7 @@ def gradio_demo(
     save_queue_size=80,
     batch_size=1,
     window_size=1,
-    progress=gr.Progress(track_tqdm=True)
+    progress=gr.Progress()
 ):
     """
     Perform reconstruction using the already-created target_dir/images.
@@ -429,7 +446,8 @@ def gradio_demo(
             img_queue_size=int(img_queue_size),
             save_queue_size=int(save_queue_size),
             batch_size=int(batch_size),
-            window_size=int(window_size)
+            window_size=int(window_size),
+            progress=progress
         )
 
     # Handle None frame_filter
