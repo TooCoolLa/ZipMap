@@ -760,7 +760,7 @@ with gr.Blocks(
                 batch_size = gr.Slider(
                     label="Inference Batch Size",
                     minimum=1,
-                    maximum=64,
+                    maximum=1024,
                     value=16,
                     step=1
                 )
