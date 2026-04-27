@@ -116,7 +116,7 @@ def main():
                 "c2w": c2w,
                 "points": data["world_points_from_depth"], # (H, W, 3)
                 "img_path": img_path,
-                "mask_path": os.path.join(args.mask_dir, img_name + "_mask.png")
+                "mask_path": os.path.join(args.mask_dir, full_name + "_mask.png")
             })
 
     load_all_data()
