@@ -405,8 +405,9 @@ def gradio_demo(
     """
     Perform reconstruction using the already-created target_dir/images.
     """
+    print(f"DEBUG: gradio_demo called with target_dir='{target_dir}'")
     if not os.path.isdir(target_dir) or target_dir == "None":
-        return None, "No valid target directory found. Please upload first.", None, None
+        return None, "No valid target directory found. Please upload first.", gr.update()
 
     start_time = time.time()
     gc.collect()
@@ -868,6 +869,8 @@ with gr.Blocks(
     # Auto-update gallery whenever user uploads or changes their files
     # -------------------------------------------------------------------------
     def wrap_update_gallery(input_video, input_images, target_fps):
+        if not input_video and not input_images:
+            return [gr.update()] * 7
         _, target_dir, all_paths, log_msg = update_gallery_on_upload(input_video, input_images, target_fps)
         gallery_slice, info, p_num = get_gallery_slice(all_paths, 1)
         return None, target_dir, all_paths, gallery_slice, info, p_num, log_msg
