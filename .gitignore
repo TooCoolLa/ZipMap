@@ -153,4 +153,5 @@ skyseg.onnx
 *.egg-info
 raw_data/
 .gradio/certificate.pem
+.sshinfo
 

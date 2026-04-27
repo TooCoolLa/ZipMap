@@ -83,7 +83,7 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
         self.random_window_size_rgn.seed(0)
         self.random_window_size_list = [1, 2, 4, 6, 8, 12, 24]
 
-    def forward(self, images: torch.Tensor, query_info: torch.Tensor = None, store_state: bool = False, window_size: int = None):
+    def forward(self, images: torch.Tensor, query_info: torch.Tensor = None, store_state: bool = False, window_size: int = None, state_list: list = None):
         """
         Forward pass of the VGGT model.
 
@@ -94,6 +94,7 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
                 Default: None
             store_state (bool, optional): Whether to store the TTT state for future queries.
             window_size (int, optional): Window size (frame number) for TTT operations. Default is None.
+            state_list (list, optional): TTT state list from previous frames. Default is None.
 
         """        
         # If without batch dimension, add it
@@ -104,6 +105,8 @@ class ZipMap(nn.Module, PyTorchModelHubMixin):
             # "ttt_op_order": ttt_op_order, # define later in forward
             "store_state": store_state, # if to store the state_list for future queries
         }
+        if state_list is not None:
+            info["state_list"] = state_list
 
         if window_size is not None:
             info["window_size"] = window_size

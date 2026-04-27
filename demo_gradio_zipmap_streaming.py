@@ -85,7 +85,7 @@ model = model.to(device)
 # -------------------------------------------------------------------------
 # 1) Core model inference (Streaming)
 # -------------------------------------------------------------------------
-def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None) -> dict:
+def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=None, img_queue_size=200, save_queue_size=80) -> dict:
     """
     Run the ZipMap model on images in the 'target_dir/images' folder using streaming multi-threading.
     """
@@ -112,8 +112,8 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
     for _ in range(num_load_threads):
         path_queue.put(None)  # poison pills for loaders
 
-    image_queue = queue.Queue(maxsize=200)
-    save_queue = queue.Queue(maxsize=80)
+    image_queue = queue.Queue(maxsize=img_queue_size)
+    save_queue = queue.Queue(maxsize=save_queue_size)
 
     # Start workers
     loaders = [ImageLoaderWorker(path_queue, image_queue) for _ in range(num_load_threads)]
@@ -332,6 +332,10 @@ def gradio_demo(
     mask_sky=False,
     prediction_mode="Pointmap Regression",
     cam_size_factor=1.0,
+    loading_threads=2,
+    img_queue_size=200,
+    save_threads=None,
+    save_queue_size=80,
 ):
     """
     Perform reconstruction using the already-created target_dir/images.
@@ -351,7 +355,14 @@ def gradio_demo(
 
     print("Running run_model_streaming...")
     with torch.no_grad():
-        predictions = run_model_streaming(target_dir, model)
+        predictions = run_model_streaming(
+            target_dir, 
+            model, 
+            num_load_threads=int(loading_threads), 
+            num_save_threads=int(save_threads) if save_threads is not None else None,
+            img_queue_size=int(img_queue_size),
+            save_queue_size=int(save_queue_size)
+        )
 
     # Handle None frame_filter
     if frame_filter is None:
@@ -467,7 +478,7 @@ def update_visualization(
         glbscene = predictions_to_glb(
             predictions,
             conf_thres=conf_thres,
-            filter_by_frames="All", # Fixed: since data is already filtered
+            filter_by_frames=frame_filter,
             mask_black_bg=mask_black_bg,
             mask_white_bg=mask_white_bg,
             show_cam=show_cam,
@@ -602,6 +613,35 @@ with gr.Blocks(
                 info="Target frames per second for video sampling (default: 1.0 FPS) \n You need to re-upload the video after changing this value."
             )
 
+            loading_threads = gr.Slider(
+                label="Loading Threads",
+                minimum=1,
+                maximum=8,
+                value=2,
+                step=1
+            )
+            img_queue_size = gr.Slider(
+                label="Image Queue Size",
+                minimum=10,
+                maximum=500,
+                value=200,
+                step=10
+            )
+            save_threads = gr.Slider(
+                label="Saving Threads",
+                minimum=1,
+                maximum=os.cpu_count() or 8,
+                value=max(1, (os.cpu_count() or 4) - 2),
+                step=1
+            )
+            save_queue_size = gr.Slider(
+                label="Saving Queue Size",
+                minimum=10,
+                maximum=200,
+                value=80,
+                step=10
+            )
+
             image_gallery = gr.Gallery(
                 label="Preview",
                 columns=4,
@@ -733,6 +773,10 @@ with gr.Blocks(
             mask_sky,
             prediction_mode,
             cam_size_factor,
+            loading_threads,
+            img_queue_size,
+            save_threads,
+            save_queue_size,
         ],
         outputs=[reconstruction_output, log_output, frame_filter],
     ).then(

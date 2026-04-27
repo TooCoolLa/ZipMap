@@ -105,8 +105,13 @@ def predictions_to_glb(
                 )
 
             for i, image_name in enumerate(image_list):
-                if i >= S:
+                # If we have only 1 frame but it's a specific frame from a larger sequence
+                if S == 1 and selected_frame_idx is not None:
+                    if i != selected_frame_idx:
+                        continue
+                elif i >= S:
                     break
+
                 image_filepath = os.path.join(target_dir_images, image_name)
                 mask_filepath = os.path.join(target_dir, "sky_masks", image_name)
 
@@ -138,7 +143,7 @@ def predictions_to_glb(
             sky_mask_binary = (sky_mask_array > 0.1).astype(np.float32)
             pred_world_points_conf = pred_world_points_conf * sky_mask_binary
 
-    if selected_frame_idx is not None:
+    if selected_frame_idx is not None and len(pred_world_points) > 1:
         pred_world_points = pred_world_points[selected_frame_idx][None]
         pred_world_points_conf = pred_world_points_conf[selected_frame_idx][None]
         images = images[selected_frame_idx][None]
