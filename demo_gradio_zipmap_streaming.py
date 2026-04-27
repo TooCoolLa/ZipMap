@@ -767,7 +767,7 @@ with gr.Blocks(
                 window_size = gr.Slider(
                     label="TTT Window Size",
                     minimum=1,
-                    maximum=16,
+                    maximum=512,
                     value=1,
                     step=1
                 )
