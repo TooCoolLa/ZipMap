@@ -94,7 +94,13 @@ def main():
             
             # Match image
             img_name = os.path.basename(path).replace(".npz", "")
-            img_path = glob.glob(os.path.join(args.image_dir, img_name + ".*"))[0]
+            img_matches = glob.glob(os.path.join(args.image_dir, img_name + ".*"))
+            
+            if not img_matches:
+                print(f"Warning: Could not find image for {img_name} in {args.image_dir}. Skipping frame.")
+                continue
+                
+            img_path = img_matches[0]
             
             data_cache.append({
                 "c2w": c2w,
