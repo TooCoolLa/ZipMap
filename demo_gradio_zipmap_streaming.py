@@ -182,16 +182,16 @@ def run_model_streaming(target_dir, model, num_load_threads=2, num_save_threads=
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         
         # Convert tensors to numpy and remove batch dim (result: [S, ...])
-        extrinsic_all = extrinsic.cpu().float().numpy().squeeze(0)
-        intrinsic_all = intrinsic.cpu().float().numpy().squeeze(0)
-        depth_all = predictions["depth"].cpu().float().numpy().squeeze(0)
-        depth_conf_all = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if "depth_conf" in predictions else [None] * len(batch_data)
+        extrinsic_all = extrinsic.cpu().float().numpy().squeeze(0) if extrinsic is not None else None
+        intrinsic_all = intrinsic.cpu().float().numpy().squeeze(0) if intrinsic is not None else None
+        depth_all = predictions["depth"].cpu().float().numpy().squeeze(0) if predictions.get("depth") is not None else None
+        depth_conf_all = predictions["depth_conf"].cpu().float().numpy().squeeze(0) if predictions.get("depth_conf") is not None else [None] * len(batch_data)
         
         local_points_all = None
         local_points_conf_all = None
         if "local_points" in predictions:
-            local_points_all = predictions["local_points"].cpu().float().numpy().squeeze(0)
-            local_points_conf_all = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if "local_points_conf" in predictions else [None] * len(batch_data)
+            local_points_all = predictions["local_points"].cpu().float().numpy().squeeze(0) if predictions.get("local_points") is not None else None
+            local_points_conf_all = predictions["local_points_conf"].cpu().float().numpy().squeeze(0) if predictions.get("local_points_conf") is not None else [None] * len(batch_data)
 
         # Extract results for each frame in the batch
         for i in range(len(batch_data)):
@@ -547,12 +547,31 @@ initial_image_paths = None
 initial_log_msg = "Please upload a video or images, then click Reconstruct."
 
 if args.image_dir and os.path.isdir(args.image_dir):
-    image_files = sorted([os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
-                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    if image_files:
-        print(f"Pre-loading {len(image_files)} images from {args.image_dir}")
-        initial_target_dir, initial_image_paths = handle_uploads(None, image_files)
-        initial_log_msg = f"Pre-loaded {len(image_files)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+    # Create a unique folder name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    initial_target_dir = os.path.join(BASE_CACHE_DIR, f"input_images_{timestamp}")
+    target_dir_images = os.path.join(initial_target_dir, "images")
+    
+    os.makedirs(initial_target_dir, exist_ok=True)
+    
+    # Symlink the entire directory instead of copying individual files
+    try:
+        os.symlink(os.path.abspath(args.image_dir), target_dir_images)
+        
+        # Get image paths through the symlink to keep it consistent
+        initial_image_paths = sorted([os.path.join(target_dir_images, f) for f in os.listdir(target_dir_images) 
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+        
+        print(f"Pre-loading {len(initial_image_paths)} images from {args.image_dir} (via symlink)")
+        print(f"Symlinked {args.image_dir} to {target_dir_images}")
+        initial_log_msg = f"Pre-loaded {len(initial_image_paths)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+    except Exception as e:
+        print(f"Failed to symlink {args.image_dir}, falling back to copy: {e}")
+        image_files = sorted([os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+        if image_files:
+            initial_target_dir, initial_image_paths = handle_uploads(None, image_files)
+            initial_log_msg = f"Pre-loaded {len(image_files)} images from {args.image_dir}. Click 'Reconstruct' to begin."
 
 initial_gallery_value, initial_page_info, initial_page_num = get_gallery_slice(initial_image_paths, 1)
 

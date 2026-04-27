@@ -57,6 +57,7 @@ parser.add_argument('--ckpt_path', type=str, default="./checkpoints/checkpoint_a
 parser.add_argument('--ema', action='store_true', help='Use EMA weights if available')
 parser.add_argument('--align_first_view', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True, help='Align output point cloud to the first view coordinate system (default: True)')
 parser.add_argument('--affine_invariant', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True, help='Whether to use affine invariant mode (default: True)')
+parser.add_argument('--image_dir', '-i', type=str, default=None, help='Path to local image directory')
 args = parser.parse_args()
 
 model_config["other_config"]["affine_invariant"] = args.affine_invariant
@@ -444,6 +445,38 @@ walkthrough_video = "examples/videos/walkthrough.mp4"
 # -------------------------------------------------------------------------
 # 6) Build Gradio UI
 # -------------------------------------------------------------------------
+# Initial values for Gradio components
+initial_target_dir = "None"
+initial_image_paths = None
+initial_log_msg = "Please upload a video or images, then click Reconstruct."
+
+if args.image_dir and os.path.isdir(args.image_dir):
+    # Create a unique folder name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    initial_target_dir = os.path.join(BASE_CACHE_DIR, f"input_images_{timestamp}")
+    target_dir_images = os.path.join(initial_target_dir, "images")
+    
+    os.makedirs(initial_target_dir, exist_ok=True)
+    
+    # Symlink the entire directory instead of copying individual files
+    try:
+        os.symlink(os.path.abspath(args.image_dir), target_dir_images)
+        
+        # Get image paths through the symlink to keep it consistent
+        initial_image_paths = sorted([os.path.join(target_dir_images, f) for f in os.listdir(target_dir_images) 
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+        
+        print(f"Pre-loading {len(initial_image_paths)} images from {args.image_dir} (via symlink)")
+        print(f"Symlinked {args.image_dir} to {target_dir_images}")
+        initial_log_msg = f"Pre-loaded {len(initial_image_paths)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+    except Exception as e:
+        print(f"Failed to symlink {args.image_dir}, falling back to copy: {e}")
+        image_files = sorted([os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+        if image_files:
+            initial_target_dir, initial_image_paths = handle_uploads(None, image_files)
+            initial_log_msg = f"Pre-loaded {len(image_files)} images from {args.image_dir}. Click 'Reconstruct' to begin."
+
 theme = gr.themes.Ocean()
 theme.set(
     checkbox_label_background_fill_selected="*button_primary_background_fill",
@@ -529,7 +562,7 @@ with gr.Blocks(
     """
     )
 
-    target_dir_output = gr.Textbox(label="Target Dir", visible=False, value="None")
+    target_dir_output = gr.Textbox(label="Target Dir", visible=False, value=initial_target_dir)
 
     with gr.Row():
         with gr.Column(scale=2):
@@ -552,13 +585,14 @@ with gr.Blocks(
                 show_download_button=True,
                 object_fit="contain",
                 preview=True,
+                value=initial_image_paths,
             )
 
         with gr.Column(scale=4):
             with gr.Column():
                 gr.Markdown("**3D Reconstruction (Point Cloud and Camera Poses)**")
                 log_output = gr.Markdown(
-                    "Please upload a video or images, then click Reconstruct.", elem_classes=["custom-log"]
+                    initial_log_msg, elem_classes=["custom-log"]
                 )
                 reconstruction_output = gr.Model3D(height=520, zoom_speed=0.5, pan_speed=0.5, camera_position=(-90, 90, 3.0))
 
